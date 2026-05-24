@@ -26,6 +26,7 @@ def git_version(version):
     import subprocess
 
     git_hash = ''
+    git_date = ''
     try:
         p = subprocess.Popen(
             ['git', '-c', 'log.showSignature=false', 'log', '-1', '--format="%H %aI"'],
@@ -47,9 +48,32 @@ def git_version(version):
                 .split()
             )
 
-            # Only attach git tag to development versions
-            if 'dev' in version:
-                version += f'+git{git_date}.{git_hash[:7]}'
+    # Unofficial rebuilds (the dragon-array LoongArch/LASX wheels) mark
+    # themselves with a PEP 440 local version label. The authoritative source
+    # is the base version in pyproject.toml, e.g. "2.5.0.dev0+dragon.unofficial.1"
+    # — that's the one place guaranteed to survive build front-ends (pypa/build
+    # stages the source without .git, so a git/LOCAL_VERSION lookup misses).
+    # If the base already carries a '+' segment, leave it: PEP 440 permits only
+    # one, so we must not also append the git label.
+    if '+' in version:
+        return version, git_hash
+
+    # Otherwise, a LOCAL_VERSION file at the repo root or the NUMPY_LOCAL_VERSION
+    # env var can supply the label for in-tree builds; failing that, dev builds
+    # get the usual git suffix.
+    local = ''
+    lv_file = os.path.join(os.path.dirname(__file__), '..', '..', 'LOCAL_VERSION')
+    if os.path.isfile(lv_file):
+        with open(lv_file) as f:
+            local = f.read().strip()
+    if not local:
+        local = os.environ.get('NUMPY_LOCAL_VERSION', '').strip()
+
+    if local:
+        version += f'+{local}'
+    elif git_hash and 'dev' in version:
+        # Only attach git tag to development versions
+        version += f'+git{git_date}.{git_hash[:7]}'
 
     return version, git_hash
 

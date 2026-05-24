@@ -7,7 +7,11 @@ requires = [
 
 [project]
 name = "numpy"
-version = "2.5.0.dev0"
+# dragon-array unofficial LoongArch/LASX rebuild: PEP 440 local version label.
+# Bump the trailing integer per experimental release. Lives here (not just in
+# gitversion's git/LOCAL_VERSION fallback) because pypa/build stages the source
+# without .git, so this is the one place the label is guaranteed to survive.
+version = "2.5.0.dev0+dragon.unofficial.1"
 description = "Fundamental package for array computing in Python"
 authors = [{name = "Travis E. Oliphant et al."}]
 maintainers = [
