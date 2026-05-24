@@ -989,7 +989,13 @@ foreach gen_mtargets : [
       VSX3, VSX2,
       NEON,
       VXE, VX,
-      LASX, LSX,
+      # LASX intentionally omitted: comparison ops emit a 1-byte bool per
+      # element, and packing the wide b32/b64 masks down to bytes needs
+      # cross-128-bit-lane xvpermi_d fixups on LASX. On these store-bound
+      # ops that packing costs more than the 256-bit width buys — measured
+      # 0.78x (less uint32) / 0.87x (uint64) vs the 128-bit LSX path, with
+      # no dtype faster than 1.02x. Same reason loops_unary_fp_le forces 128.
+      LSX,
     ]
   ],
   [
