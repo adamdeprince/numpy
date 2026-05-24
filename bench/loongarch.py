@@ -344,7 +344,7 @@ def main() -> int:
 
     print("\nBinary ops — contiguous NPYV vs strided scalar libm")
     binary_results = run_binary(n, iters, dtypes)
-    for group in ("loops_umath_fp Tier 2",):
+    for group in ("loops_arithm_fp", "loops_umath_fp Tier 2"):
         print_section(group, binary_results.get(group, []))
 
     print("\nLogical ops — Highway")

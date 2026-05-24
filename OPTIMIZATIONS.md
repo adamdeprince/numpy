@@ -1493,3 +1493,44 @@ exponentiates absolute precision into relative-precision-at-tiny-value
 which converts to ~65 ULP. Closer-to-1.0 `pow` results stay ≤8 ULP.
 Documented for future-me as a known limitation; fixing requires
 double-double arithmetic across the log+exp pair.
+
+## 2026-05-25 — Release 1: LASX for the basic ops, and two tradeoffs
+
+Enabled LASX (256-bit) for the everyday element-wise dispatch units that the
+earlier transcendental work had left at LSX: `loops_arithm_fp` (float
+add/sub/mul/divide + complex), `loops_unary`, `loops_unary_fp` (sqrt,
+reciprocal, square, abs, rint/floor/ceil/trunc), `loops_unary_complex`, and
+`loops_autovec`. Almost free: the LASX NPYV backend (NumPy's own
+upstream/community work) already implements every intrinsic these files need —
+the switches just hadn't been flipped in `meson.build`.
+
+Two dispatch units are deliberately kept on **LSX** because LASX is a net loss
+on store-bound, byte-output ops where the wide→byte pack needs cross-128-bit-lane
+`xvpermi_d` fixups:
+
+- `loops_unary_fp_le` (isnan/isinf/isfinite/signbit) — already forced 128-bit
+  upstream via `NPY_SIMD_FORCE_128`.
+- `loops_comparison` (less/greater/…) — measured 0.78× (less uint32) / 0.87×
+  (uint64) on LASX vs ~1.0× on LSX, with no comparison dtype faster than 1.02×.
+  Removed LASX from its arch list. `minmax` stays on LASX (same-width output, no
+  pack — `max` gains 1.3–1.5×).
+
+### Known tradeoff kept on LASX: f32 add/sub/mul
+
+`loops_arithm_fp` is one dispatch unit, so it's all-or-nothing. Measured on the
+3A6000: `divide` f32 +92%, all f64 arith +9–14%, but f32 `add`/`sub`/`mul`
+**−19%**. Kept on LASX for the divide/f64 wins. Cause of the f32 regression not
+profiled — likely memory-bandwidth-bound, but that's a hypothesis, not measured;
+cache-resident and higher-bandwidth-part behavior is untested. In BENCHMARKS.md.
+
+### Headline (release 1)
+
+Full rebench incl. sort, dragon `2.5.0.dev0+dragon.unofficial.1` vs stock NumPy
+`2.5.0.dev0`, back-to-back on an idle 3A6000, `--iters 30`, 135 op × dtype
+pairs: **geomean 3.31×** (f16 10.7×, bool 11.4×, f32 4.5×, f64 3.6×, int 1.8×).
+
+### Bench methodology note
+
+Only compare runs taken back-to-back on an idle box. A stale-stock-vs-fresh-dragon
+comparison once produced a fake "the fix made it worse"; the `max`/`multiply`
+control ops (which should be stable) are the tell for a contaminated run.
