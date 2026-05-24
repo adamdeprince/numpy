@@ -663,6 +663,63 @@ simd_log_FLOAT(npy_float * op,
 #endif // @CHK@
 /**end repeat**/
 
+/********************************************************************************
+ ** NPYV implementation of exp/log for f32
+ ** Kernels live in npyv_exp_log.h so the same code can also power sinh/cosh/
+ ** exp2/log2/log10/arcsinh/arccosh/arctanh in loops_umath_fp.dispatch.c.src.
+ ********************************************************************************/
+#include "npyv_exp_log.h"
+
+#if defined(NPYV_IMPL_F32_EXP_LOG) && !defined(SIMD_AVX2_FMA3) && !defined(SIMD_AVX512F)
+
+/**begin repeat
+ * #func     = exp,      log#
+ * #scalarf  = npy_expf, npy_logf#
+ */
+static void
+simd_@func@_FLOAT_npyv(const npy_float *src, npy_float *dst, npy_intp n)
+{
+    const int lanes = npyv_nlanes_f32;
+    npy_intp i = 0;
+    for (; i + lanes <= n; i += lanes) {
+        npyv_f32 v = npyv_load_f32(src + i);
+        npyv_store_f32(dst + i, npyv_@func@_FLOAT_kernel(v));
+    }
+    for (; i < n; i++) {
+        dst[i] = @scalarf@(src[i]);
+    }
+}
+/**end repeat**/
+
+#endif // NPYV_IMPL_F32_EXP_LOG && !SIMD_AVX2_FMA3 && !SIMD_AVX512F
+
+/********************************************************************************
+ ** NPYV implementation of exp/log for f64 — kernels in npyv_exp_log.h.
+ ********************************************************************************/
+#if defined(NPYV_IMPL_F64_EXP_LOG) && !defined(SIMD_AVX2_FMA3) && !defined(SIMD_AVX512F) && !defined(SIMD_AVX512F_NOCLANG_BUG)
+
+
+/**begin repeat
+ * #func     = exp,     log#
+ * #scalar   = npy_exp, npy_log#
+ */
+static void
+simd_@func@_DOUBLE_npyv(const npy_double *src, npy_double *dst, npy_intp n)
+{
+    const int lanes = npyv_nlanes_f64;
+    npy_intp i = 0;
+    for (; i + lanes <= n; i += lanes) {
+        npyv_f64 v = npyv_load_f64(src + i);
+        npyv_store_f64(dst + i, npyv_@func@_DOUBLE_kernel(v));
+    }
+    for (; i < n; i++) {
+        dst[i] = @scalar@(src[i]);
+    }
+}
+/**end repeat**/
+
+#endif // NPY_SIMD_F64 && !AVX paths
+
 #if NPY_SIMD && defined(NPY_HAVE_AVX512_SKX) && defined(NPY_CAN_LINK_SVML)
 /**begin repeat
  * #func = exp, log#
@@ -1297,6 +1354,16 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_@func@)
             simd_@func@_FLOAT((npy_float *)op1, (npy_float *)ip1, 1, steps[0]);
         }
     }
+#elif defined(NPYV_IMPL_F32_EXP_LOG)
+    if (steps[0] == sizeof(npy_float) && steps[1] == sizeof(npy_float)) {
+        simd_@func@_FLOAT_npyv(
+            (const npy_float *)args[0], (npy_float *)args[1], dimensions[0]);
+        return;
+    }
+    UNARY_LOOP {
+        const npy_float in1 = *(npy_float *)ip1;
+        *(npy_float *)op1 = @scalarf@(in1);
+    }
 #else
     UNARY_LOOP {
         const npy_float in1 = *(npy_float *)ip1;
@@ -1335,6 +1402,13 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_@func@)
     }
 #endif // SIMD_AVX512F_NOCLANG_BUG
 #endif // NPY_CAN_LINK_SVML
+#if defined(NPYV_IMPL_F64_EXP_LOG)
+    if (steps[0] == sizeof(npy_double) && steps[1] == sizeof(npy_double)) {
+        simd_@func@_DOUBLE_npyv(
+            (const npy_double *)args[0], (npy_double *)args[1], dimensions[0]);
+        return;
+    }
+#endif
     UNARY_LOOP {
         const npy_double in1 = *(npy_double *)ip1;
         *(npy_double *)op1 = @scalar@(in1);

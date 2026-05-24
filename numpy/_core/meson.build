@@ -101,10 +101,6 @@ if use_svml
   endif
 endif
 
-if host_machine.cpu_family() == 'loongarch64'
-  add_project_arguments(['-DHWY_COMPILE_ONLY_SCALAR'], language: ['cpp'])
-endif
-
 use_highway = not get_option('disable-highway')
 if use_highway and not fs.exists('src/highway/README.md')
   error('Missing the `highway` git submodule! Run `git submodule update --init` to fix this.')
@@ -914,14 +910,16 @@ foreach gen_mtargets : [
     'highway_qsort.dispatch.h',
     'src/npysort/highway_qsort.dispatch.cpp',
     use_highway ? [
-      ASIMD, VSX2,  # FIXME: disable VXE due to runtime segfault
+      ASIMD, VSX2, LASX, LSX,  # FIXME: disable VXE due to runtime segfault
     ] : []
   ],
   [
     'highway_qsort_16bit.dispatch.h',
     'src/npysort/highway_qsort_16bit.dispatch.cpp',
     use_highway ? [
-      ASIMDHP, VSX2,  # VXE FIXME: disable VXE due to runtime segfault
+      ASIMDHP, VSX2, LSX,  # VXE FIXME: disable VXE due to runtime segfault
+                          # LASX excluded: Highway's 16-bit vqsort regresses
+                          # vs LSX on 3A6000 (~94 -> ~59 Melem/s on int16 n=1M)
     ] : []
   ],
 ]
@@ -980,7 +978,7 @@ foreach gen_mtargets : [
       NEON,
       VSX4, VSX2,
       VX,
-      LSX,
+      LASX, LSX,
     ]
   ],
   [
@@ -991,7 +989,7 @@ foreach gen_mtargets : [
       VSX3, VSX2,
       NEON,
       VXE, VX,
-      LSX,
+      LASX, LSX,
     ]
   ],
   [
@@ -999,6 +997,7 @@ foreach gen_mtargets : [
     src_file.process('src/umath/loops_exponent_log.dispatch.c.src'),
     [
       X86_V4, X86_V3,
+      LASX, LSX,
     ]
   ],
   [
@@ -1009,7 +1008,7 @@ foreach gen_mtargets : [
       VSX4, VSX2,
       NEON_VFPV4,
       VXE,
-      LSX,
+      LASX, LSX,
     ]
   ],
   [
@@ -1020,7 +1019,7 @@ foreach gen_mtargets : [
       X86_V4, X86_V3, X86_V2,
       VSX2,
       VX,
-      LSX,
+      LASX, LSX,
       RVV,
     ]
   ],
@@ -1032,14 +1031,15 @@ foreach gen_mtargets : [
       X86_V4, X86_V3, X86_V2,
       VSX2,
       VXE, VX,
-      LSX,
+      LASX, LSX,
     ]
   ],
   [
     'loops_modulo.dispatch.h',
     src_file.process('src/umath/loops_modulo.dispatch.c.src'),
     [
-      VSX4
+      VSX4,
+      LASX, LSX,
     ]
   ],
   [
@@ -1050,13 +1050,13 @@ foreach gen_mtargets : [
       VSX4, VSX3, VSX2,
       NEON_VFPV4,
       VXE2, VXE,
-      LSX,
+      LASX, LSX,
     ]
   ],
   [
     'loops_umath_fp.dispatch.h',
     src_file.process('src/umath/loops_umath_fp.dispatch.c.src'),
-    [X86_V4]
+    [X86_V4, LASX, LSX]
   ],
   [
     'loops_unary.dispatch.h',
@@ -1116,7 +1116,7 @@ foreach gen_mtargets : [
   [
     'loops_half.dispatch.h',
     src_file.process('src/umath/loops_half.dispatch.c.src'),
-    [AVX512_SPR, X86_V4]
+    [AVX512_SPR, X86_V4, LASX, LSX]
   ],
 ]
   mtargets = mod_features.multi_targets(

@@ -212,23 +212,76 @@ simd_sincos_f32(const float *src, npy_intp ssrc, float *dst, npy_intp sdst,
 }
 #endif  // NPY_SIMD_FMA3
 
-/* Disable SIMD code sin/cos f64 and revert to libm: see
- * https://mail.python.org/archives/list/numpy-discussion@python.org/thread/C6EYZZSR4EWGVKHAZXLE7IBILRMNVK7L/
- * for detailed discussion on this*/
-#define DISPATCH_DOUBLE_FUNC(func)                                          \
+/*
+ * Upstream numpy disables SIMD f64 sin/cos and routes to libm (see the
+ * numpy-discussion thread linked above) because Cody-Waite range reduction
+ * loses precision for |x| >= 2^20 and the previously-shipped SVML kernel
+ * had no Payne-Hanek fallback. The LoongArch path below has both:
+ *
+ *   - Fast: per-block, if every lane satisfies |x| < 2^20, run the
+ *     FDLIBM polynomial after Cody-Waite reduction.
+ *   - Slow: otherwise, do per-lane Payne-Hanek scalar reduction
+ *     (FDLIBM __kernel_rem_pio2 algorithm, see payne_hanek_f64.h),
+ *     pack the resulting (r, quadrant) into vectors, then run the
+ *     polynomial in SIMD. Covers the full f64 normal range with
+ *     libm-equivalent precision and avoids the per-element libm call.
+ */
+#if NPY_SIMD && defined(__loongarch__)
+#include "npyv_sincos.h"
+#endif
+
+#if NPY_SIMD && defined(__loongarch__) && defined(NPYV_IMPL_F64_EXP_LOG)
+
+#define DISPATCH_DOUBLE_FUNC(func, OPCODE)                                  \
     NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_##func)(               \
             char **args, npy_intp const *dimensions, npy_intp const *steps, \
             void *NPY_UNUSED(data))                                         \
     {                                                                       \
-        UNARY_LOOP                                                          \
-        {                                                                   \
+        const npy_intp len   = dimensions[0];                               \
+        const npy_intp sstep = steps[0] / (npy_intp)sizeof(npy_double);     \
+        const npy_intp dstep = steps[1] / (npy_intp)sizeof(npy_double);     \
+        const npy_double *src = (const npy_double *)args[0];                \
+        npy_double *dst       = (npy_double *)args[1];                      \
+        npy_intp n = len;                                                   \
+        if (sstep == 1 && dstep == 1) {                                     \
+            const int lanes = npyv_nlanes_f64;                              \
+            const npyv_f64 max_cody =                                       \
+                npyv_setall_f64(NPYV_SINCOS_F64_CODY_MAX);                  \
+            for (; n >= lanes; n -= lanes, src += lanes, dst += lanes) {    \
+                npyv_f64 x = npyv_load_f64(src);                            \
+                npyv_b64 in_range =                                         \
+                    npyv_cmple_f64(npyv_abs_f64(x), max_cody);              \
+                if (NPY_LIKELY(npyv_all_b64(in_range))) {                   \
+                    npyv_store_f64(dst,                                     \
+                        npyv__sincos_f64_kernel(x, (OPCODE)));              \
+                } else {                                                    \
+                    npyv_store_f64(dst,                                     \
+                        npyv__sincos_f64_slow_path(x, (OPCODE)));           \
+                }                                                           \
+            }                                                               \
+        }                                                                   \
+        for (; n > 0; n--, src += sstep, dst += dstep) {                    \
+            *dst = npy_##func(*src);                                        \
+        }                                                                   \
+    }
+
+#else  /* non-LoongArch: keep upstream's libm-only behavior */
+
+#define DISPATCH_DOUBLE_FUNC(func, OPCODE)                                  \
+    NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_##func)(               \
+            char **args, npy_intp const *dimensions, npy_intp const *steps, \
+            void *NPY_UNUSED(data))                                         \
+    {                                                                       \
+        UNARY_LOOP {                                                        \
             const npy_double in1 = *(npy_double *)ip1;                      \
             *(npy_double *)op1 = npy_##func(in1);                           \
         }                                                                   \
     }
 
-DISPATCH_DOUBLE_FUNC(sin)
-DISPATCH_DOUBLE_FUNC(cos)
+#endif
+
+DISPATCH_DOUBLE_FUNC(sin, NPYV_SINCOS_OP_SIN)
+DISPATCH_DOUBLE_FUNC(cos, NPYV_SINCOS_OP_COS)
 
 NPY_NO_EXPORT void
 NPY_CPU_DISPATCH_CURFX(FLOAT_sin)(char **args, npy_intp const *dimensions,

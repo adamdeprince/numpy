@@ -4,6 +4,7 @@
 #include "loops.h"
 #include "npy_svml.h"
 #include "fast_loop_macros.h"
+#include "npyv_exp_log.h"
 
 #if NPY_SIMD && defined(NPY_HAVE_AVX512_SKX) && defined(NPY_CAN_LINK_SVML)
 /**begin repeat
@@ -97,6 +98,1047 @@ simd_@func@_@sfx@(const npyv_lanetype_@sfx@ *src1, npy_intp ssrc1,
 /**end repeat**/
 #endif
 
+/* ============================================================================
+ * NPYV Tier-1 transcendentals — wrappers around npyv_exp/log kernels.
+ * sinh, cosh, exp2, log2, log10, asinh, acosh, atanh in f32 + f64.
+ * Each kernel sets NPYV_HAVE_<intrin>_<sfx> so the dispatcher template
+ * below can pick up the right NPYV path per (op, precision).
+ * ============================================================================ */
+#if defined(NPYV_IMPL_F32_EXP_LOG)
+#define NPYV_HAVE_sinh_f32  1
+NPY_FINLINE npyv_f32 npyv_sinh_FLOAT_kernel(npyv_f32 x)
+{
+    npyv_f32 ex  = npyv_exp_FLOAT_kernel(x);
+    npyv_f32 enx = npyv_exp_FLOAT_kernel(npyv_sub_f32(npyv_zero_f32(), x));
+    return npyv_mul_f32(npyv_sub_f32(ex, enx), npyv_setall_f32(0.5f));
+}
+#define NPYV_HAVE_cosh_f32  1
+NPY_FINLINE npyv_f32 npyv_cosh_FLOAT_kernel(npyv_f32 x)
+{
+    npyv_f32 ex  = npyv_exp_FLOAT_kernel(x);
+    npyv_f32 enx = npyv_exp_FLOAT_kernel(npyv_sub_f32(npyv_zero_f32(), x));
+    return npyv_mul_f32(npyv_add_f32(ex, enx), npyv_setall_f32(0.5f));
+}
+#define NPYV_HAVE_exp2_f32  1
+NPY_FINLINE npyv_f32 npyv_exp2_FLOAT_kernel(npyv_f32 x)
+{
+    return npyv_exp_FLOAT_kernel(npyv_mul_f32(x, npyv_setall_f32(NPY_LOGE2f)));
+}
+#define NPYV_HAVE_log2_f32  1
+NPY_FINLINE npyv_f32 npyv_log2_FLOAT_kernel(npyv_f32 x)
+{
+    return npyv_mul_f32(npyv_log_FLOAT_kernel(x), npyv_setall_f32(NPY_LOG2Ef));
+}
+#define NPYV_HAVE_log10_f32 1
+NPY_FINLINE npyv_f32 npyv_log10_FLOAT_kernel(npyv_f32 x)
+{
+    return npyv_mul_f32(npyv_log_FLOAT_kernel(x), npyv_setall_f32(NPY_LOG10Ef));
+}
+/* arcsinh(x).
+ *   moderate |x|: log1p(|x| + x²/(1 + sqrt(1+x²)))  (no 1+x² cancellation)
+ *   huge      |x|: log(|x|) + ln(2)                  (avoids x² overflow)
+ * arcsinh is odd; compute on |x|, then negate where x<0.
+ * Special inputs (NaN, large/inf where x² would overflow) are masked out
+ * of the moderate path so no spurious FP flags fire; the huge path's
+ * log(|x|) handles +inf cleanly. */
+#define NPYV_HAVE_asinh_f32 1
+NPY_FINLINE npyv_f32 npyv_asinh_FLOAT_kernel(npyv_f32 x)
+{
+    npyv_f32 zero = npyv_zero_f32();
+    npyv_f32 one  = npyv_setall_f32(1.0f);
+    /* sqrt(FLT_MAX) ≈ 1.84e19; safely below at 2^15 = 32768 */
+    npyv_f32 huge_thresh = npyv_setall_f32(0x1.0p15f);
+    npyv_f32 ln2 = npyv_setall_f32(NPY_LOGE2f);
+
+    npyv_b32 not_nan = npyv_notnan_f32(x);
+    npyv_f32 x_safe = npyv_select_f32(not_nan, x, one);
+    npyv_f32 abs_x = npyv_abs_f32(x_safe);
+    npyv_b32 is_huge = npyv_cmpge_f32(abs_x, huge_thresh);
+
+    /* Moderate path: force huge inputs to 1 so x² doesn't overflow */
+    npyv_f32 x_mod = npyv_select_f32(is_huge, one, x_safe);
+    npyv_f32 sq    = npyv_muladd_f32(x_mod, x_mod, one);
+    npyv_f32 sqrt_term = npyv_sqrt_f32(sq);
+    npyv_f32 denom = npyv_add_f32(one, sqrt_term);
+    npyv_f32 corr  = npyv_div_f32(npyv_mul_f32(x_mod, x_mod), denom);
+    npyv_f32 arg   = npyv_add_f32(npyv_abs_f32(x_mod), corr);
+    npyv_f32 moderate = npyv_log1p_FLOAT_kernel(arg);
+
+    /* Huge path: arcsinh(x) ≈ log(|x|) + ln(2) for |x| >> 1 */
+    npyv_f32 huge = npyv_add_f32(npyv_log_FLOAT_kernel(abs_x), ln2);
+
+    npyv_f32 res = npyv_select_f32(is_huge, huge, moderate);
+    npyv_b32 neg = npyv_cmplt_f32(x_safe, zero);
+    res = npyv_select_f32(neg, npyv_sub_f32(zero, res), res);
+    return npyv_select_f32(not_nan, res, x);
+}
+#define NPYV_HAVE_acosh_f32 1
+NPY_FINLINE npyv_f32 npyv_acosh_FLOAT_kernel(npyv_f32 x)
+{
+    /* arccosh(x) = log(x + sqrt(x²-1)), x >= 1; NaN otherwise */
+    npyv_f32 one = npyv_setall_f32(1.0f);
+    npyv_f32 nan = npyv_setall_f32(NPY_NANF);
+    npyv_b32 not_nan = npyv_notnan_f32(x);
+    npyv_f32 x_safe  = npyv_select_f32(not_nan, x, one);
+    npyv_b32 invalid = npyv_cmplt_f32(x_safe, one);
+    x_safe = npyv_select_f32(invalid, one, x_safe);
+    npyv_f32 sq = npyv_sub_f32(npyv_mul_f32(x_safe, x_safe), one);
+    npyv_f32 arg = npyv_add_f32(x_safe, npyv_sqrt_f32(sq));
+    npyv_f32 res = npyv_log_FLOAT_kernel(arg);
+    res = npyv_select_f32(invalid, nan, res);
+    return npyv_select_f32(not_nan, res, x);
+}
+/* arctanh(x) = 0.5 * log1p(2x / (1 - x))
+ * The 2x/(1-x) form is exact for small x (no 1+x cancellation) and gives
+ * the expected ±inf at x = ±1 via log1p's log-of-zero handling. For |x|>1
+ * the resulting log1p argument is < -1, which propagates NaN. */
+#define NPYV_HAVE_atanh_f32 1
+NPY_FINLINE npyv_f32 npyv_atanh_FLOAT_kernel(npyv_f32 x)
+{
+    npyv_f32 one  = npyv_setall_f32(1.0f);
+    npyv_f32 two  = npyv_setall_f32(2.0f);
+    npyv_f32 half = npyv_setall_f32(0.5f);
+    npyv_f32 nan  = npyv_setall_f32(NPY_NANF);
+    /* Guard |x| > 1 to avoid log1p of a value that produces unwanted finite
+     * results; we want NaN there. */
+    npyv_b32 not_nan = npyv_notnan_f32(x);
+    npyv_b32 above   = npyv_cmpgt_f32(x, one);
+    npyv_b32 below   = npyv_cmplt_f32(x, npyv_setall_f32(-1.0f));
+    npyv_b32 invalid = npyv_or_b32(above, below);
+    npyv_f32 x_safe  = npyv_select_f32(invalid, npyv_zero_f32(), x);
+    x_safe = npyv_select_f32(not_nan, x_safe, npyv_zero_f32());
+
+    npyv_f32 arg = npyv_div_f32(npyv_mul_f32(two, x_safe),
+                                npyv_sub_f32(one, x_safe));
+    npyv_f32 res = npyv_mul_f32(npyv_log1p_FLOAT_kernel(arg), half);
+    res = npyv_select_f32(invalid, nan, res);
+    return npyv_select_f32(not_nan, res, x);
+}
+/* tanh f32: NPYV kernel intentionally NOT defined here — the Highway
+ * SVML port in loops_hyperbolic.dispatch.cpp.src outperforms our
+ * expm1-based form on LASX (~307 M/s vs ~166 M/s). FLOAT_tanh stays
+ * with that source for all targets. */
+#endif /* NPYV_IMPL_F32_EXP_LOG */
+
+#if defined(NPYV_IMPL_F64_EXP_LOG)
+#define NPYV_HAVE_sinh_f64  1
+NPY_FINLINE npyv_f64 npyv_sinh_DOUBLE_kernel(npyv_f64 x)
+{
+    npyv_f64 ex  = npyv_exp_DOUBLE_kernel(x);
+    npyv_f64 enx = npyv_exp_DOUBLE_kernel(npyv_sub_f64(npyv_zero_f64(), x));
+    return npyv_mul_f64(npyv_sub_f64(ex, enx), npyv_setall_f64(0.5));
+}
+#define NPYV_HAVE_cosh_f64  1
+NPY_FINLINE npyv_f64 npyv_cosh_DOUBLE_kernel(npyv_f64 x)
+{
+    npyv_f64 ex  = npyv_exp_DOUBLE_kernel(x);
+    npyv_f64 enx = npyv_exp_DOUBLE_kernel(npyv_sub_f64(npyv_zero_f64(), x));
+    return npyv_mul_f64(npyv_add_f64(ex, enx), npyv_setall_f64(0.5));
+}
+#define NPYV_HAVE_exp2_f64  1
+NPY_FINLINE npyv_f64 npyv_exp2_DOUBLE_kernel(npyv_f64 x)
+{
+    return npyv_exp_DOUBLE_kernel(npyv_mul_f64(x, npyv_setall_f64(NPY_LOGE2)));
+}
+#define NPYV_HAVE_log2_f64  1
+NPY_FINLINE npyv_f64 npyv_log2_DOUBLE_kernel(npyv_f64 x)
+{
+    return npyv_mul_f64(npyv_log_DOUBLE_kernel(x), npyv_setall_f64(NPY_LOG2E));
+}
+#define NPYV_HAVE_log10_f64 1
+NPY_FINLINE npyv_f64 npyv_log10_DOUBLE_kernel(npyv_f64 x)
+{
+    return npyv_mul_f64(npyv_log_DOUBLE_kernel(x), npyv_setall_f64(NPY_LOG10E));
+}
+#define NPYV_HAVE_asinh_f64 1
+NPY_FINLINE npyv_f64 npyv_asinh_DOUBLE_kernel(npyv_f64 x)
+{
+    npyv_f64 zero = npyv_zero_f64();
+    npyv_f64 one  = npyv_setall_f64(1.0);
+    /* sqrt(DBL_MAX) ≈ 1.34e154; safely below at 2^27 */
+    npyv_f64 huge_thresh = npyv_setall_f64(0x1.0p27);
+    npyv_f64 ln2 = npyv_setall_f64(NPY_LOGE2);
+
+    npyv_b64 not_nan = npyv_notnan_f64(x);
+    npyv_f64 x_safe = npyv_select_f64(not_nan, x, one);
+    npyv_f64 abs_x = npyv_abs_f64(x_safe);
+    npyv_b64 is_huge = npyv_cmpge_f64(abs_x, huge_thresh);
+
+    npyv_f64 x_mod = npyv_select_f64(is_huge, one, x_safe);
+    npyv_f64 sq    = npyv_muladd_f64(x_mod, x_mod, one);
+    npyv_f64 sqrt_term = npyv_sqrt_f64(sq);
+    npyv_f64 denom = npyv_add_f64(one, sqrt_term);
+    npyv_f64 corr  = npyv_div_f64(npyv_mul_f64(x_mod, x_mod), denom);
+    npyv_f64 arg   = npyv_add_f64(npyv_abs_f64(x_mod), corr);
+    npyv_f64 moderate = npyv_log1p_DOUBLE_kernel(arg);
+
+    npyv_f64 huge = npyv_add_f64(npyv_log_DOUBLE_kernel(abs_x), ln2);
+
+    npyv_f64 res = npyv_select_f64(is_huge, huge, moderate);
+    npyv_b64 neg = npyv_cmplt_f64(x_safe, zero);
+    res = npyv_select_f64(neg, npyv_sub_f64(zero, res), res);
+    return npyv_select_f64(not_nan, res, x);
+}
+#define NPYV_HAVE_acosh_f64 1
+NPY_FINLINE npyv_f64 npyv_acosh_DOUBLE_kernel(npyv_f64 x)
+{
+    npyv_f64 one = npyv_setall_f64(1.0);
+    npyv_f64 nan = npyv_setall_f64(NPY_NAN);
+    npyv_b64 not_nan = npyv_notnan_f64(x);
+    npyv_f64 x_safe  = npyv_select_f64(not_nan, x, one);
+    npyv_b64 invalid = npyv_cmplt_f64(x_safe, one);
+    x_safe = npyv_select_f64(invalid, one, x_safe);
+    npyv_f64 sq = npyv_sub_f64(npyv_mul_f64(x_safe, x_safe), one);
+    npyv_f64 arg = npyv_add_f64(x_safe, npyv_sqrt_f64(sq));
+    npyv_f64 res = npyv_log_DOUBLE_kernel(arg);
+    res = npyv_select_f64(invalid, nan, res);
+    return npyv_select_f64(not_nan, res, x);
+}
+/* Direct Padé for arctanh on |x| ≤ 0.5 (Cephes coefficients): the
+ * function is approximated as x + x·t·P(t)/Q(t) where t = x². This skips
+ * log1p entirely on the common case. Per-block dispatch in
+ * npyv_atanh_DOUBLE_kernel picks this path when every lane is in range. */
+NPY_FINLINE npyv_f64 npyv__atanh_pade_f64(npyv_f64 x)
+{
+    /* Cephes atanh.c — peak relative error 1.4e-17 for |x| < 0.5 */
+    const npyv_f64 P0 = npyv_setall_f64(-8.54074331929669305196e-1);
+    const npyv_f64 P1 = npyv_setall_f64( 1.20426861384072379242e+1);
+    const npyv_f64 P2 = npyv_setall_f64(-4.61252884198732692637e+1);
+    const npyv_f64 P3 = npyv_setall_f64( 6.54566728676544377376e+1);
+    const npyv_f64 P4 = npyv_setall_f64(-3.09092539379866942570e+1);
+    /* Q (leading 1 implicit) */
+    const npyv_f64 Q0 = npyv_setall_f64(-1.95638849376911654834e+1);
+    const npyv_f64 Q1 = npyv_setall_f64( 1.08938092147140262656e+2);
+    const npyv_f64 Q2 = npyv_setall_f64(-2.49839401325893582985e+2);
+    const npyv_f64 Q3 = npyv_setall_f64( 2.52006675691344555838e+2);
+    const npyv_f64 Q4 = npyv_setall_f64(-9.27277618139601130017e+1);
+    const npyv_f64 one = npyv_setall_f64(1.0);
+
+    npyv_f64 t = npyv_mul_f64(x, x);
+    /* Cephes convention: P[0] is the highest-power coefficient. So
+     * P(t) = P0·t⁴ + P1·t³ + P2·t² + P3·t + P4 = ((((P0·t + P1)·t + P2)·t + P3)·t + P4 */
+    npyv_f64 P = P0;
+    P = npyv_muladd_f64(P, t, P1);
+    P = npyv_muladd_f64(P, t, P2);
+    P = npyv_muladd_f64(P, t, P3);
+    P = npyv_muladd_f64(P, t, P4);
+    /* Q(t) = t⁵ + Q0·t⁴ + Q1·t³ + Q2·t² + Q3·t + Q4 (implicit leading 1)
+     * = (((((1·t + Q0)·t + Q1)·t + Q2)·t + Q3)·t + Q4 */
+    npyv_f64 Q = npyv_muladd_f64(one, t, Q0);
+    Q = npyv_muladd_f64(Q, t, Q1);
+    Q = npyv_muladd_f64(Q, t, Q2);
+    Q = npyv_muladd_f64(Q, t, Q3);
+    Q = npyv_muladd_f64(Q, t, Q4);
+    /* result = x + x·t·(P/Q) */
+    npyv_f64 ratio = npyv_div_f64(P, Q);
+    return npyv_muladd_f64(npyv_mul_f64(t, x), ratio, x);
+}
+
+/* Full-range arctanh via the log1p identity. Handles |x| >= 0.5 (where
+ * the Padé doesn't converge) and the boundary cases x = ±1, |x| > 1, NaN. */
+NPY_FINLINE npyv_f64 npyv__atanh_full_f64(npyv_f64 x)
+{
+    npyv_f64 one  = npyv_setall_f64(1.0);
+    npyv_f64 two  = npyv_setall_f64(2.0);
+    npyv_f64 half = npyv_setall_f64(0.5);
+    npyv_f64 nan  = npyv_setall_f64(NPY_NAN);
+    npyv_b64 not_nan = npyv_notnan_f64(x);
+    npyv_b64 above   = npyv_cmpgt_f64(x, one);
+    npyv_b64 below   = npyv_cmplt_f64(x, npyv_setall_f64(-1.0));
+    npyv_b64 invalid = npyv_or_b64(above, below);
+    npyv_f64 x_safe  = npyv_select_f64(invalid, npyv_zero_f64(), x);
+    x_safe = npyv_select_f64(not_nan, x_safe, npyv_zero_f64());
+
+    npyv_f64 arg = npyv_div_f64(npyv_mul_f64(two, x_safe),
+                                npyv_sub_f64(one, x_safe));
+    npyv_f64 res = npyv_mul_f64(npyv_log1p_DOUBLE_kernel(arg), half);
+    res = npyv_select_f64(invalid, nan, res);
+    return npyv_select_f64(not_nan, res, x);
+}
+
+#define NPYV_HAVE_atanh_f64 1
+NPY_FINLINE npyv_f64 npyv_atanh_DOUBLE_kernel(npyv_f64 x)
+{
+    /* Cephes Padé is accurate to ULP for |x| ≤ 0.5; outside that band
+     * the function asymptotes and the polynomial form would diverge. */
+    const npyv_f64 thresh = npyv_setall_f64(0.5);
+    npyv_b64 in_fast = npyv_cmple_f64(npyv_abs_f64(x), thresh);
+    if (NPY_LIKELY(npyv_all_b64(in_fast))) {
+        return npyv__atanh_pade_f64(x);
+    }
+    return npyv__atanh_full_f64(x);
+}
+/* tanh f64 — Taylor polynomial in z=x² for |x|<0.25 (12 terms, ULP-clean),
+ * expm1(2x)/(expm1(2x)+2) for larger |x|. */
+#define NPYV_HAVE_tanh_f64 1
+NPY_FINLINE npyv_f64 npyv_tanh_DOUBLE_kernel(npyv_f64 x)
+{
+    const npyv_f64 zero = npyv_zero_f64();
+    const npyv_f64 two  = npyv_setall_f64(2.0);
+    const npyv_f64 sat  = npyv_setall_f64(20.0);
+    const npyv_f64 nsat = npyv_setall_f64(-20.0);
+    /* tanh Taylor in z = x². 12 terms cover f64 ULP for |x| < 0.25
+     * (omitted z^12 ≈ 0.0625^12 · 1.6e-5 ≈ 5.7e-20, well below ULP). */
+    const npyv_f64 c0  = npyv_setall_f64( 1.0);
+    const npyv_f64 c1  = npyv_setall_f64(-3.333333333333333e-1);
+    const npyv_f64 c2  = npyv_setall_f64( 1.333333333333333e-1);
+    const npyv_f64 c3  = npyv_setall_f64(-5.396825396825397e-2);
+    const npyv_f64 c4  = npyv_setall_f64( 2.186948853615520e-2);
+    const npyv_f64 c5  = npyv_setall_f64(-8.863235529902197e-3);
+    const npyv_f64 c6  = npyv_setall_f64( 3.592128036572481e-3);
+    const npyv_f64 c7  = npyv_setall_f64(-1.455834387051318e-3);
+    const npyv_f64 c8  = npyv_setall_f64( 5.900274409455860e-4);
+    const npyv_f64 c9  = npyv_setall_f64(-2.391291142435525e-4);
+    const npyv_f64 c10 = npyv_setall_f64( 9.691537956929450e-5);
+    const npyv_f64 c11 = npyv_setall_f64(-3.927832388331683e-5);
+
+    npyv_b64 not_nan = npyv_notnan_f64(x);
+    npyv_f64 x_safe  = npyv_select_f64(not_nan, x, zero);
+    npyv_f64 abs_x   = npyv_abs_f64(x_safe);
+    npyv_b64 is_small = npyv_cmplt_f64(abs_x, npyv_setall_f64(0.25));
+
+    if (NPY_LIKELY(!npyv_any_b64(is_small))) {
+        npyv_f64 sx  = npyv_min_f64(npyv_max_f64(x_safe, nsat), sat);
+        npyv_f64 em  = npyv_expm1_DOUBLE_kernel(npyv_mul_f64(two, sx));
+        npyv_f64 res = npyv_div_f64(em, npyv_add_f64(em, two));
+        return npyv_select_f64(not_nan, res, x);
+    }
+    if (npyv_all_b64(is_small)) {
+        npyv_f64 z = npyv_mul_f64(x_safe, x_safe);
+        npyv_f64 p = npyv_muladd_f64(c11, z, c10);
+        p = npyv_muladd_f64(p, z, c9);
+        p = npyv_muladd_f64(p, z, c8);
+        p = npyv_muladd_f64(p, z, c7);
+        p = npyv_muladd_f64(p, z, c6);
+        p = npyv_muladd_f64(p, z, c5);
+        p = npyv_muladd_f64(p, z, c4);
+        p = npyv_muladd_f64(p, z, c3);
+        p = npyv_muladd_f64(p, z, c2);
+        p = npyv_muladd_f64(p, z, c1);
+        p = npyv_muladd_f64(p, z, c0);
+        npyv_f64 res = npyv_mul_f64(x_safe, p);
+        return npyv_select_f64(not_nan, res, x);
+    }
+    /* Mixed — both paths, blend. */
+    npyv_f64 z = npyv_mul_f64(x_safe, x_safe);
+    npyv_f64 p = npyv_muladd_f64(c11, z, c10);
+    p = npyv_muladd_f64(p, z, c9);
+    p = npyv_muladd_f64(p, z, c8);
+    p = npyv_muladd_f64(p, z, c7);
+    p = npyv_muladd_f64(p, z, c6);
+    p = npyv_muladd_f64(p, z, c5);
+    p = npyv_muladd_f64(p, z, c4);
+    p = npyv_muladd_f64(p, z, c3);
+    p = npyv_muladd_f64(p, z, c2);
+    p = npyv_muladd_f64(p, z, c1);
+    p = npyv_muladd_f64(p, z, c0);
+    npyv_f64 poly = npyv_mul_f64(x_safe, p);
+    npyv_f64 sx  = npyv_min_f64(npyv_max_f64(x_safe, nsat), sat);
+    npyv_f64 em  = npyv_expm1_DOUBLE_kernel(npyv_mul_f64(two, sx));
+    npyv_f64 ef  = npyv_div_f64(em, npyv_add_f64(em, two));
+    npyv_f64 res = npyv_select_f64(is_small, poly, ef);
+    return npyv_select_f64(not_nan, res, x);
+}
+#endif /* NPYV_IMPL_F64_EXP_LOG */
+
+/* ============================================================================
+ * NPYV Tier-2 — arctan and friends. arctan uses FDLIBM's 3-way range
+ * reduction: |x| reduced to [-tan(π/8), tan(π/8)] then a minimax polynomial.
+ *   |x| > tan(3π/8) : arctan(x) = π/2 + sign(x)·arctan(-1/|x|)
+ *   tan(π/8) < |x| ≤ tan(3π/8) : arctan(x) = π/4·sign(x) + arctan((|x|-1)/(|x|+1))·sign(x)
+ *   |x| ≤ tan(π/8) : arctan(x) = arctan(x)  (polynomial directly)
+ * arctan is odd: we compute on |x| and apply sign at the end.
+ * ============================================================================ */
+
+#if defined(NPYV_IMPL_F32_EXP_LOG)
+#define NPYV_HAVE_atan_f32 1
+NPY_FINLINE npyv_f32 npyv_atan_FLOAT_kernel(npyv_f32 x)
+{
+    const npyv_f32 zero  = npyv_zero_f32();
+    const npyv_f32 one   = npyv_setall_f32(1.0f);
+    const npyv_f32 tan_pi8  = npyv_setall_f32(0.41421356237309504880f);
+    const npyv_f32 tan_3pi8 = npyv_setall_f32(2.41421356237309504880f);
+    const npyv_f32 pi_4 = npyv_setall_f32(0.78539816339744830962f);
+    const npyv_f32 pi_2 = npyv_setall_f32(1.57079632679489661923f);
+    /* FDLIBM atanf minimax coefficients for |z| ≤ 0.4375 */
+    const npyv_f32 aT0 = npyv_setall_f32( 3.3333328366e-01f);
+    const npyv_f32 aT1 = npyv_setall_f32(-1.9999158382e-01f);
+    const npyv_f32 aT2 = npyv_setall_f32( 1.4253635705e-01f);
+    const npyv_f32 aT3 = npyv_setall_f32(-1.0648017377e-01f);
+    const npyv_f32 aT4 = npyv_setall_f32( 6.1687607318e-02f);
+
+    npyv_b32 not_nan = npyv_notnan_f32(x);
+    npyv_f32 x_safe = npyv_select_f32(not_nan, x, zero);
+    npyv_f32 abs_x = npyv_abs_f32(x_safe);
+
+    npyv_b32 use_inv = npyv_cmpgt_f32(abs_x, tan_3pi8);   /* large */
+    npyv_b32 use_mid = npyv_andc_b8(npyv_cmpgt_f32(abs_x, tan_pi8), use_inv);
+
+    /* z for each region. Mask abs_x to safe values where this lane won't be
+     * picked, so the unused branches don't raise spurious FP flags (e.g.
+     * (inf-1)/(inf+1) = NaN with INVALID, or 1/0 with DIV_BY_ZERO). */
+    npyv_f32 abs_x_for_inv = npyv_select_f32(use_inv, abs_x, one);
+    npyv_f32 abs_x_for_mid = npyv_select_f32(use_inv, one, abs_x);
+    npyv_f32 z_inv = npyv_div_f32(one, abs_x_for_inv);
+    npyv_f32 z_mid = npyv_div_f32(npyv_sub_f32(abs_x_for_mid, one),
+                                  npyv_add_f32(abs_x_for_mid, one));
+    npyv_f32 z = npyv_select_f32(use_inv, z_inv,
+                 npyv_select_f32(use_mid, z_mid, abs_x));
+
+    /* Polynomial: arctan(z) ≈ z - z·z²·P(z²)
+     * Horner from highest coeff to lowest: */
+    npyv_f32 w = npyv_mul_f32(z, z);
+    npyv_f32 p = aT4;
+    p = npyv_muladd_f32(p, w, aT3);
+    p = npyv_muladd_f32(p, w, aT2);
+    p = npyv_muladd_f32(p, w, aT1);
+    p = npyv_muladd_f32(p, w, aT0);
+    /* atan_z = z - z * w * p */
+    npyv_f32 atan_z = npyv_sub_f32(z, npyv_mul_f32(npyv_mul_f32(z, w), p));
+
+    /* Combine with the adjustment for each region:
+     *   use_inv : arctan(|x|) = π/2 - atan_z   (note z = 1/|x|, atan_z is positive)
+     *   use_mid : arctan(|x|) = π/4 + atan_z
+     *   else    : arctan(|x|) = atan_z
+     */
+    npyv_f32 result_inv = npyv_sub_f32(pi_2, atan_z);
+    npyv_f32 result_mid = npyv_add_f32(pi_4, atan_z);
+    npyv_f32 magnitude = npyv_select_f32(use_inv, result_inv,
+                       npyv_select_f32(use_mid, result_mid, atan_z));
+
+    /* Apply sign of x */
+    npyv_b32 neg = npyv_cmplt_f32(x_safe, zero);
+    npyv_f32 res = npyv_select_f32(neg, npyv_sub_f32(zero, magnitude), magnitude);
+    return npyv_select_f32(not_nan, res, x);
+}
+#endif /* NPYV_IMPL_F32_EXP_LOG */
+
+#if defined(NPYV_IMPL_F64_EXP_LOG)
+#define NPYV_HAVE_atan_f64 1
+NPY_FINLINE npyv_f64 npyv_atan_DOUBLE_kernel(npyv_f64 x)
+{
+    const npyv_f64 zero  = npyv_zero_f64();
+    const npyv_f64 one   = npyv_setall_f64(1.0);
+    const npyv_f64 tan_pi8  = npyv_setall_f64(0.41421356237309504880);
+    const npyv_f64 tan_3pi8 = npyv_setall_f64(2.41421356237309504880);
+    const npyv_f64 pi_4 = npyv_setall_f64(0.78539816339744830962);
+    const npyv_f64 pi_2 = npyv_setall_f64(1.57079632679489661923);
+    /* FDLIBM atan minimax coefficients for |z| ≤ 0.4375 */
+    const npyv_f64 aT0  = npyv_setall_f64( 3.33333333333329318027e-01);
+    const npyv_f64 aT1  = npyv_setall_f64(-1.99999999998764832476e-01);
+    const npyv_f64 aT2  = npyv_setall_f64( 1.42857142725034663711e-01);
+    const npyv_f64 aT3  = npyv_setall_f64(-1.11111104054623557880e-01);
+    const npyv_f64 aT4  = npyv_setall_f64( 9.09088713343650656196e-02);
+    const npyv_f64 aT5  = npyv_setall_f64(-7.69187620504482999495e-02);
+    const npyv_f64 aT6  = npyv_setall_f64( 6.66107313738753120669e-02);
+    const npyv_f64 aT7  = npyv_setall_f64(-5.83357013379057348645e-02);
+    const npyv_f64 aT8  = npyv_setall_f64( 4.97687799461593236017e-02);
+    const npyv_f64 aT9  = npyv_setall_f64(-3.65315727442169155270e-02);
+    const npyv_f64 aT10 = npyv_setall_f64( 1.62858201153657823623e-02);
+
+    npyv_b64 not_nan = npyv_notnan_f64(x);
+    npyv_f64 x_safe = npyv_select_f64(not_nan, x, zero);
+    npyv_f64 abs_x = npyv_abs_f64(x_safe);
+
+    npyv_b64 use_inv = npyv_cmpgt_f64(abs_x, tan_3pi8);
+    npyv_b64 use_mid = npyv_andc_b8(npyv_cmpgt_f64(abs_x, tan_pi8), use_inv);
+
+    npyv_f64 abs_x_for_inv = npyv_select_f64(use_inv, abs_x, one);
+    npyv_f64 abs_x_for_mid = npyv_select_f64(use_inv, one, abs_x);
+    npyv_f64 z_inv = npyv_div_f64(one, abs_x_for_inv);
+    npyv_f64 z_mid = npyv_div_f64(npyv_sub_f64(abs_x_for_mid, one),
+                                  npyv_add_f64(abs_x_for_mid, one));
+    npyv_f64 z = npyv_select_f64(use_inv, z_inv,
+                 npyv_select_f64(use_mid, z_mid, abs_x));
+
+    npyv_f64 w = npyv_mul_f64(z, z);
+    npyv_f64 p = aT10;
+    p = npyv_muladd_f64(p, w, aT9);
+    p = npyv_muladd_f64(p, w, aT8);
+    p = npyv_muladd_f64(p, w, aT7);
+    p = npyv_muladd_f64(p, w, aT6);
+    p = npyv_muladd_f64(p, w, aT5);
+    p = npyv_muladd_f64(p, w, aT4);
+    p = npyv_muladd_f64(p, w, aT3);
+    p = npyv_muladd_f64(p, w, aT2);
+    p = npyv_muladd_f64(p, w, aT1);
+    p = npyv_muladd_f64(p, w, aT0);
+    npyv_f64 atan_z = npyv_sub_f64(z, npyv_mul_f64(npyv_mul_f64(z, w), p));
+
+    npyv_f64 result_inv = npyv_sub_f64(pi_2, atan_z);
+    npyv_f64 result_mid = npyv_add_f64(pi_4, atan_z);
+    npyv_f64 magnitude = npyv_select_f64(use_inv, result_inv,
+                       npyv_select_f64(use_mid, result_mid, atan_z));
+
+    npyv_b64 neg = npyv_cmplt_f64(x_safe, zero);
+    npyv_f64 res = npyv_select_f64(neg, npyv_sub_f64(zero, magnitude), magnitude);
+    return npyv_select_f64(not_nan, res, x);
+}
+#endif /* NPYV_IMPL_F64_EXP_LOG */
+
+/* ============================================================================
+ * arcsin / arccos via arctan
+ *   arcsin(x) = arctan(x / sqrt(1 - x²))
+ *   arccos(x) = π/2 - arcsin(x)
+ * Both undefined for |x| > 1 (NaN).
+ * ============================================================================ */
+
+#if defined(NPYV_HAVE_atan_f32)
+#define NPYV_HAVE_asin_f32 1
+NPY_FINLINE npyv_f32 npyv_asin_FLOAT_kernel(npyv_f32 x)
+{
+    /* arcsin(x) = arctan(x/sqrt(1-x²)). The formula divides by zero at
+     * |x| = 1 (raises DIV_BY_ZERO). We force x_safe=0 in those lanes to
+     * avoid the spurious flag and inject the correct ±π/2 result. */
+    const npyv_f32 zero = npyv_zero_f32();
+    const npyv_f32 one  = npyv_setall_f32(1.0f);
+    const npyv_f32 nan  = npyv_setall_f32(NPY_NANF);
+    const npyv_f32 pi_2 = npyv_setall_f32(1.57079632679489661923f);
+    npyv_f32 abs_x = npyv_abs_f32(x);
+    npyv_b32 invalid = npyv_cmpgt_f32(abs_x, one);
+    npyv_b32 at_one  = npyv_cmpeq_f32(abs_x, one);
+    npyv_f32 x_safe = npyv_select_f32(invalid, zero, x);
+    x_safe = npyv_select_f32(at_one, zero, x_safe);
+    npyv_f32 denom = npyv_sqrt_f32(npyv_sub_f32(one, npyv_mul_f32(x_safe, x_safe)));
+    npyv_f32 arg = npyv_div_f32(x_safe, denom);
+    npyv_f32 res = npyv_atan_FLOAT_kernel(arg);
+    npyv_f32 sign_pi_2 = npyv_select_f32(npyv_cmplt_f32(x, zero),
+                                         npyv_sub_f32(zero, pi_2), pi_2);
+    res = npyv_select_f32(at_one, sign_pi_2, res);
+    return npyv_select_f32(invalid, nan, res);
+}
+#define NPYV_HAVE_acos_f32 1
+NPY_FINLINE npyv_f32 npyv_acos_FLOAT_kernel(npyv_f32 x)
+{
+    /* acos(x) = π/2 - asin(x) */
+    const npyv_f32 pi_2 = npyv_setall_f32(1.57079632679489661923f);
+    return npyv_sub_f32(pi_2, npyv_asin_FLOAT_kernel(x));
+}
+#endif /* NPYV_HAVE_atan_f32 */
+
+/* ============================================================================
+ * arctan2(y, x) — quadrant-aware arctan
+ *   x > 0:                  arctan(y/x)
+ *   x < 0, y >= 0:          arctan(y/x) + π
+ *   x < 0, y < 0:           arctan(y/x) - π
+ *   x == 0, y > 0:          +π/2
+ *   x == 0, y < 0:          -π/2
+ *   x == 0, y == 0:         0
+ * Force x to a non-zero value for the division when x==0 to avoid spurious
+ * DIV_BY_ZERO; the explicit x==0 branch supplies the right answer.
+ * ============================================================================ */
+#if defined(NPYV_HAVE_atan_f32)
+#define NPYV_HAVE_atan2_f32 1
+NPY_FINLINE npyv_f32 npyv_atan2_FLOAT_kernel(npyv_f32 y, npyv_f32 x)
+{
+    const npyv_f32 zero = npyv_zero_f32();
+    const npyv_f32 one  = npyv_setall_f32(1.0f);
+    const npyv_f32 pi   = npyv_setall_f32(3.14159265358979323846f);
+    const npyv_f32 pi_2 = npyv_setall_f32(1.57079632679489661923f);
+    const npyv_f32 neg_pi   = npyv_setall_f32(-3.14159265358979323846f);
+    const npyv_f32 neg_pi_2 = npyv_setall_f32(-1.57079632679489661923f);
+    const npyv_f32 nan  = npyv_setall_f32(NPY_NANF);
+
+    npyv_b32 not_nan = npyv_and_b8(npyv_notnan_f32(y), npyv_notnan_f32(x));
+    npyv_f32 y_safe = npyv_select_f32(not_nan, y, zero);
+    npyv_f32 x_safe = npyv_select_f32(not_nan, x, one);
+
+    npyv_b32 x_zero = npyv_cmpeq_f32(x_safe, zero);
+    npyv_b32 x_neg  = npyv_cmplt_f32(x_safe, zero);
+    npyv_b32 y_neg  = npyv_cmplt_f32(y_safe, zero);
+    npyv_b32 y_pos  = npyv_cmpgt_f32(y_safe, zero);
+
+    /* Avoid divide-by-zero by replacing zero x with 1.0 for the division
+     * path. The x==0 lanes are overwritten with the correct result below. */
+    npyv_f32 x_div = npyv_select_f32(x_zero, one, x_safe);
+    npyv_f32 ratio = npyv_div_f32(y_safe, x_div);
+    npyv_f32 atan_r = npyv_atan_FLOAT_kernel(ratio);
+
+    /* For x < 0: shift by ±π depending on sign of y */
+    npyv_f32 shift = npyv_select_f32(y_neg, neg_pi, pi);
+    npyv_f32 with_neg_x = npyv_add_f32(atan_r, shift);
+    npyv_f32 res_nz_x = npyv_select_f32(x_neg, with_neg_x, atan_r);
+
+    /* For x == 0: depends on sign of y */
+    npyv_f32 res_z_x = npyv_select_f32(y_pos, pi_2,
+                                       npyv_select_f32(y_neg, neg_pi_2, zero));
+
+    npyv_f32 res = npyv_select_f32(x_zero, res_z_x, res_nz_x);
+    return npyv_select_f32(not_nan, res, nan);
+}
+#endif
+
+#if defined(NPYV_HAVE_atan_f64)
+#define NPYV_HAVE_atan2_f64 1
+NPY_FINLINE npyv_f64 npyv_atan2_DOUBLE_kernel(npyv_f64 y, npyv_f64 x)
+{
+    const npyv_f64 zero = npyv_zero_f64();
+    const npyv_f64 one  = npyv_setall_f64(1.0);
+    const npyv_f64 pi   = npyv_setall_f64(3.14159265358979323846);
+    const npyv_f64 pi_2 = npyv_setall_f64(1.57079632679489661923);
+    const npyv_f64 neg_pi   = npyv_setall_f64(-3.14159265358979323846);
+    const npyv_f64 neg_pi_2 = npyv_setall_f64(-1.57079632679489661923);
+    const npyv_f64 nan  = npyv_setall_f64(NPY_NAN);
+
+    npyv_b64 not_nan = npyv_and_b8(npyv_notnan_f64(y), npyv_notnan_f64(x));
+    npyv_f64 y_safe = npyv_select_f64(not_nan, y, zero);
+    npyv_f64 x_safe = npyv_select_f64(not_nan, x, one);
+
+    npyv_b64 x_zero = npyv_cmpeq_f64(x_safe, zero);
+    npyv_b64 x_neg  = npyv_cmplt_f64(x_safe, zero);
+    npyv_b64 y_neg  = npyv_cmplt_f64(y_safe, zero);
+    npyv_b64 y_pos  = npyv_cmpgt_f64(y_safe, zero);
+
+    npyv_f64 x_div = npyv_select_f64(x_zero, one, x_safe);
+    npyv_f64 ratio = npyv_div_f64(y_safe, x_div);
+    npyv_f64 atan_r = npyv_atan_DOUBLE_kernel(ratio);
+
+    npyv_f64 shift = npyv_select_f64(y_neg, neg_pi, pi);
+    npyv_f64 with_neg_x = npyv_add_f64(atan_r, shift);
+    npyv_f64 res_nz_x = npyv_select_f64(x_neg, with_neg_x, atan_r);
+
+    npyv_f64 res_z_x = npyv_select_f64(y_pos, pi_2,
+                                       npyv_select_f64(y_neg, neg_pi_2, zero));
+
+    npyv_f64 res = npyv_select_f64(x_zero, res_z_x, res_nz_x);
+    return npyv_select_f64(not_nan, res, nan);
+}
+#endif
+
+#if defined(NPYV_IMPL_F64_EXP_LOG)
+/* FDLIBM-style asin/acos for f64. Direct rational P/Q in t = x² for
+ * |x| < 0.5, and the identity asin(|x|) = π/2 - 2·s·(1+w) for |x| >= 0.5
+ * with s = sqrt((1-|x|)/2) and the same P/Q on t = (1-|x|)/2. Avoids
+ * going through arctan (saves the 11-coeff polynomial + 3-way reduction)
+ * which was making f64 arcsin ~2× slower than scalar libm. */
+#define NPYV_HAVE_asin_f64 1
+NPY_FINLINE npyv_f64 npyv_asin_DOUBLE_kernel(npyv_f64 x)
+{
+    const npyv_f64 zero = npyv_zero_f64();
+    const npyv_f64 one  = npyv_setall_f64(1.0);
+    const npyv_f64 half = npyv_setall_f64(0.5);
+    const npyv_f64 two  = npyv_setall_f64(2.0);
+    const npyv_f64 pi_2 = npyv_setall_f64(1.57079632679489655800);
+    const npyv_f64 nan  = npyv_setall_f64(NPY_NAN);
+    /* FDLIBM asin coefficients (from sysdeps/ieee754/dbl-64/e_asin.c) */
+    const npyv_f64 pS0 = npyv_setall_f64( 1.66666666666666657415e-01);
+    const npyv_f64 pS1 = npyv_setall_f64(-3.25565818622400915405e-01);
+    const npyv_f64 pS2 = npyv_setall_f64( 2.01212532134862925881e-01);
+    const npyv_f64 pS3 = npyv_setall_f64(-4.00555345006794114027e-02);
+    const npyv_f64 pS4 = npyv_setall_f64( 7.91534994289814532176e-04);
+    const npyv_f64 pS5 = npyv_setall_f64( 3.47933107596021167570e-05);
+    const npyv_f64 qS1 = npyv_setall_f64(-2.40339491173441421878e+00);
+    const npyv_f64 qS2 = npyv_setall_f64( 2.02094576023350569471e+00);
+    const npyv_f64 qS3 = npyv_setall_f64(-6.88283971605453293030e-01);
+    const npyv_f64 qS4 = npyv_setall_f64( 7.70381505559019352791e-02);
+
+    npyv_f64 abs_x = npyv_abs_f64(x);
+    npyv_b64 invalid = npyv_cmpgt_f64(abs_x, one);
+    npyv_b64 use_large = npyv_cmpge_f64(abs_x, half);
+
+    /* Mask out-of-range inputs so sqrt and polynomial stay finite */
+    npyv_f64 x_safe = npyv_select_f64(invalid, zero, x);
+    npyv_f64 abs_x_safe = npyv_abs_f64(x_safe);
+
+    /* t = x²  for |x|<0.5,  t = (1-|x|)/2  for |x|>=0.5 */
+    npyv_f64 t_small = npyv_mul_f64(x_safe, x_safe);
+    npyv_f64 t_large = npyv_mul_f64(npyv_sub_f64(one, abs_x_safe), half);
+    npyv_f64 t = npyv_select_f64(use_large, t_large, t_small);
+
+    /* P_poly = pS0 + t·(pS1 + t·(pS2 + t·(pS3 + t·(pS4 + t·pS5))))
+     * Q_poly = 1 + t·(qS1 + t·(qS2 + t·(qS3 + t·qS4)))
+     * w = t·P_poly / Q_poly                                            */
+    npyv_f64 P = pS5;
+    P = npyv_muladd_f64(P, t, pS4);
+    P = npyv_muladd_f64(P, t, pS3);
+    P = npyv_muladd_f64(P, t, pS2);
+    P = npyv_muladd_f64(P, t, pS1);
+    P = npyv_muladd_f64(P, t, pS0);
+    P = npyv_mul_f64(P, t);
+
+    npyv_f64 Q = qS4;
+    Q = npyv_muladd_f64(Q, t, qS3);
+    Q = npyv_muladd_f64(Q, t, qS2);
+    Q = npyv_muladd_f64(Q, t, qS1);
+    Q = npyv_muladd_f64(Q, t, one);
+
+    npyv_f64 w = npyv_div_f64(P, Q);
+
+    /* Small case: asin(x) = x + x·w */
+    npyv_f64 res_small = npyv_muladd_f64(x_safe, w, x_safe);
+
+    /* Large case: |asin(|x|)| = π/2 - 2·(s + s·w);  s = sqrt(t_large)  */
+    npyv_f64 s = npyv_sqrt_f64(t_large);
+    npyv_f64 sw = npyv_muladd_f64(s, w, s);  /* s + s·w = s·(1+w) */
+    npyv_f64 res_large_mag = npyv_sub_f64(pi_2, npyv_mul_f64(two, sw));
+    npyv_f64 res_large = npyv_select_f64(npyv_cmplt_f64(x_safe, zero),
+                                         npyv_sub_f64(zero, res_large_mag),
+                                         res_large_mag);
+
+    npyv_f64 res = npyv_select_f64(use_large, res_large, res_small);
+    return npyv_select_f64(invalid, nan, res);
+}
+
+/* acos(x): for x in [-1, 1] use 2·atan2(sqrt(1-x), sqrt(1+x)) trick if
+ * we had atan2 in hot path; here just compose on asin. Cheap.            */
+#define NPYV_HAVE_acos_f64 1
+NPY_FINLINE npyv_f64 npyv_acos_DOUBLE_kernel(npyv_f64 x)
+{
+    const npyv_f64 pi_2 = npyv_setall_f64(1.57079632679489655800);
+    return npyv_sub_f64(pi_2, npyv_asin_DOUBLE_kernel(x));
+}
+#endif /* NPYV_IMPL_F64_EXP_LOG */
+
+/* ============================================================================
+ * tan(x): reduce x by π/2 (Cody-Waite split), get r ∈ [-π/4, π/4] and
+ * integer k = round(2x/π). Then:
+ *   k even: tan(x) =  tan(r)   ≈ r + r·r²·P(r²)
+ *   k odd : tan(x) = -1/tan(r)
+ * P(w) is FDLIBM's minimax for tan(z) on [-π/4, π/4]. Range reduction is
+ * Cody-Waite with a 2-part π/2 split; accurate for |x| up to ~2^20, which
+ * comfortably covers any plotting / typical-science workload but loses
+ * precision for astronomically large arguments.
+ * ============================================================================ */
+#if defined(NPYV_IMPL_F32_EXP_LOG)
+#define NPYV_HAVE_tan_f32 1
+NPY_FINLINE npyv_f32 npyv_tan_FLOAT_kernel(npyv_f32 x)
+{
+    /* Cody-Waite split of π/2: pi_2_hi has trailing zeros so y·pi_2_hi is
+     * exact. pi_2_lo carries the remainder. */
+    const npyv_f32 inv_pi_2 = npyv_setall_f32(0x1.45f306p-1f);  /* 2/π    */
+    const npyv_f32 pi_2_hi  = npyv_setall_f32(0x1.921fb4p0f);   /* π/2 hi */
+    const npyv_f32 pi_2_lo  = npyv_setall_f32(0x1.4442d2p-24f); /* π/2 lo */
+    /* FDLIBM tanf minimax for tan(z)/z on z² ∈ [0, (π/4)²]. */
+    const npyv_f32 T0 = npyv_setall_f32(3.3333334327e-01f);
+    const npyv_f32 T1 = npyv_setall_f32(1.3333334029e-01f);
+    const npyv_f32 T2 = npyv_setall_f32(5.3968254477e-02f);
+    const npyv_f32 T3 = npyv_setall_f32(2.1869488060e-02f);
+    const npyv_f32 T4 = npyv_setall_f32(8.8632395491e-03f);
+    const npyv_f32 T5 = npyv_setall_f32(3.5920790397e-03f);
+    const npyv_f32 zero = npyv_zero_f32();
+    const npyv_f32 neg_one = npyv_setall_f32(-1.0f);
+
+    npyv_b32 not_nan = npyv_notnan_f32(x);
+    npyv_f32 x_safe = npyv_select_f32(not_nan, x, zero);
+
+    npyv_f32 y = npyv_rint_f32(npyv_mul_f32(x_safe, inv_pi_2));
+    /* r = (x - y·pi_2_hi) - y·pi_2_lo */
+    npyv_f32 r = npyv_sub_f32(x_safe, npyv_mul_f32(y, pi_2_hi));
+    r = npyv_sub_f32(r, npyv_mul_f32(y, pi_2_lo));
+
+    npyv_f32 w = npyv_mul_f32(r, r);
+    npyv_f32 p = T5;
+    p = npyv_muladd_f32(p, w, T4);
+    p = npyv_muladd_f32(p, w, T3);
+    p = npyv_muladd_f32(p, w, T2);
+    p = npyv_muladd_f32(p, w, T1);
+    p = npyv_muladd_f32(p, w, T0);
+    /* tan(r) ≈ r + r·r²·p */
+    npyv_f32 tan_r = npyv_muladd_f32(npyv_mul_f32(r, w), p, r);
+
+    /* k odd ↔ low bit of round(y) set */
+    npyv_s32 k_int = npyv_round_s32_f32(y);
+    npyv_s32 lsb = npyv_and_s32(k_int, npyv_setall_s32(1));
+    npyv_b32 is_odd = npyv_cmpneq_s32(lsb, npyv_setall_s32(0));
+
+    /* For even-k lanes, mask tan_r to 1.0 before -1/tan_r so the unused
+     * division can't raise DIV_BY_ZERO (e.g. when x=NaN ⇒ r=0 ⇒ tan_r=0). */
+    npyv_f32 tan_r_safe = npyv_select_f32(is_odd, tan_r, npyv_setall_f32(1.0f));
+    npyv_f32 inv_tan_r = npyv_div_f32(neg_one, tan_r_safe);
+
+    npyv_f32 result = npyv_select_f32(is_odd, inv_tan_r, tan_r);
+    return npyv_select_f32(not_nan, result, x);
+}
+#endif
+
+#if defined(NPYV_IMPL_F64_EXP_LOG)
+#define NPYV_HAVE_tan_f64 1
+NPY_FINLINE npyv_f64 npyv_tan_DOUBLE_kernel(npyv_f64 x)
+{
+    const npyv_f64 inv_pi_2 = npyv_setall_f64(0x1.45f306dc9c883p-1);
+    const npyv_f64 pi_2_hi  = npyv_setall_f64(0x1.921fb54442d18p0);
+    const npyv_f64 pi_2_lo  = npyv_setall_f64(0x1.1a62633145c07p-54);
+    /* FDLIBM tan minimax — 13 coefficients for tan(z)/z on z² ∈ [0, (π/4)²]. */
+    const npyv_f64 T0  = npyv_setall_f64( 3.33333333333334091986e-01);
+    const npyv_f64 T1  = npyv_setall_f64( 1.33333333333201242699e-01);
+    const npyv_f64 T2  = npyv_setall_f64( 5.39682539762260521377e-02);
+    const npyv_f64 T3  = npyv_setall_f64( 2.18694882948595424599e-02);
+    const npyv_f64 T4  = npyv_setall_f64( 8.86323982359930005737e-03);
+    const npyv_f64 T5  = npyv_setall_f64( 3.59207910759131235356e-03);
+    const npyv_f64 T6  = npyv_setall_f64( 1.45620945432529025516e-03);
+    const npyv_f64 T7  = npyv_setall_f64( 5.88041240820264096874e-04);
+    const npyv_f64 T8  = npyv_setall_f64( 2.46463134818469906812e-04);
+    const npyv_f64 T9  = npyv_setall_f64( 7.81794442939557092300e-05);
+    const npyv_f64 T10 = npyv_setall_f64( 7.14072491382608190305e-05);
+    const npyv_f64 T11 = npyv_setall_f64(-1.85586374855275456654e-05);
+    const npyv_f64 T12 = npyv_setall_f64( 2.59073051863633712884e-05);
+    const npyv_f64 zero = npyv_zero_f64();
+    const npyv_f64 neg_one = npyv_setall_f64(-1.0);
+
+    npyv_b64 not_nan = npyv_notnan_f64(x);
+    npyv_f64 x_safe = npyv_select_f64(not_nan, x, zero);
+
+    npyv_f64 y = npyv_rint_f64(npyv_mul_f64(x_safe, inv_pi_2));
+    npyv_f64 r = npyv_sub_f64(x_safe, npyv_mul_f64(y, pi_2_hi));
+    r = npyv_sub_f64(r, npyv_mul_f64(y, pi_2_lo));
+
+    npyv_f64 w = npyv_mul_f64(r, r);
+    npyv_f64 p = T12;
+    p = npyv_muladd_f64(p, w, T11);
+    p = npyv_muladd_f64(p, w, T10);
+    p = npyv_muladd_f64(p, w, T9);
+    p = npyv_muladd_f64(p, w, T8);
+    p = npyv_muladd_f64(p, w, T7);
+    p = npyv_muladd_f64(p, w, T6);
+    p = npyv_muladd_f64(p, w, T5);
+    p = npyv_muladd_f64(p, w, T4);
+    p = npyv_muladd_f64(p, w, T3);
+    p = npyv_muladd_f64(p, w, T2);
+    p = npyv_muladd_f64(p, w, T1);
+    p = npyv_muladd_f64(p, w, T0);
+    npyv_f64 tan_r = npyv_muladd_f64(npyv_mul_f64(r, w), p, r);
+
+    /* Parity of k: compare 2·rint(y/2) == y. */
+    npyv_f64 half = npyv_setall_f64(0.5);
+    npyv_f64 y_half = npyv_mul_f64(y, half);
+    npyv_f64 y_half_rounded = npyv_rint_f64(y_half);
+    npyv_b64 is_even = npyv_cmpeq_f64(npyv_mul_f64(y_half_rounded, npyv_setall_f64(2.0)), y);
+
+    /* For even-k lanes, mask tan_r to 1.0 to keep the unused -1/tan_r
+     * division from raising DIV_BY_ZERO when tan_r happens to be 0. */
+    npyv_f64 tan_r_safe = npyv_select_f64(is_even, npyv_setall_f64(1.0), tan_r);
+    npyv_f64 inv_tan_r = npyv_div_f64(neg_one, tan_r_safe);
+
+    npyv_f64 result = npyv_select_f64(is_even, tan_r, inv_tan_r);
+    return npyv_select_f64(not_nan, result, x);
+}
+#endif
+
+/* ============================================================================
+ * cbrt(x) = sign(x) · exp(log(|x|) / 3)
+ * Composes on the existing exp/log NPYV kernels. cbrt(0) = 0 with no FP
+ * flag because our log_kernel returns -inf for input 0 without signaling.
+ * ============================================================================ */
+#if defined(NPYV_IMPL_F32_EXP_LOG)
+/* cbrt f32: FDLIBM-style bit-magic initial estimate + two Halley iterations.
+ * Skips exp/log entirely (the previous implementation paid ~60 ops per element).
+ *
+ * Algorithm: hx = bits(|x|); t_bits = magic + hx/3 (gives ~5–8 bit estimate);
+ * then two Halley iters in f32 lift to f32 ULP. Halley converges cubically
+ * (5→15→45 bits) so two iterations clear the 24-bit mantissa with margin.
+ * Subnormals are pre-scaled by 2^24 and use B2 = B1 - 8·2^23 so the exponent
+ * field tracks the scale-up.
+ */
+#define NPYV_HAVE_cbrt_f32 1
+NPY_FINLINE npyv_f32 npyv_cbrt_FLOAT_kernel(npyv_f32 x)
+{
+    const npyv_f32 zero  = npyv_zero_f32();
+    const npyv_f32 one   = npyv_setall_f32(1.0f);
+    const npyv_f32 two   = npyv_setall_f32(2.0f);
+    const npyv_f32 third = npyv_setall_f32(1.0f / 3.0f);
+    /* B1 = (84 + 2/3 - 0.03306235651) · 2^23  for normal x */
+    const npyv_s32 B1    = npyv_setall_s32(709958130);
+    /* B2 = (76 + 2/3 - 0.03306235651) · 2^23  for subnormals scaled by 2^24 */
+    const npyv_s32 B2    = npyv_setall_s32(642849266);
+    const npyv_f32 scale_up = npyv_setall_f32(0x1.0p24f);
+    const npyv_f32 tiny     = npyv_setall_f32(0x1.0p-126f);
+    const npyv_f32 inf_v    = npyv_setall_f32(NPY_INFINITYF);
+
+    const npyv_u32 sign_mask = npyv_setall_u32(0x80000000u);
+    const npyv_u32 abs_mask  = npyv_setall_u32(0x7FFFFFFFu);
+    npyv_u32 x_bits   = npyv_reinterpret_u32_f32(x);
+    npyv_u32 sign     = npyv_and_u32(x_bits, sign_mask);
+    npyv_u32 abs_bits = npyv_and_u32(x_bits, abs_mask);
+    npyv_f32 abs_x    = npyv_reinterpret_f32_u32(abs_bits);
+
+    npyv_b32 is_zero      = npyv_cmpeq_f32(abs_x, zero);
+    npyv_b32 not_fin      = npyv_cmpge_f32(abs_x, inf_v);
+    npyv_b32 is_nan       = npyv_not_b32(npyv_notnan_f32(x));
+    npyv_b32 special      = npyv_or_b32(is_zero, npyv_or_b32(not_fin, is_nan));
+    npyv_b32 below_tiny   = npyv_cmplt_f32(abs_x, tiny);
+    npyv_b32 is_subnormal = npyv_and_b32(below_tiny, npyv_not_b32(is_zero));
+
+    /* Mask specials to 1.0 for the computation; restored at the end. */
+    npyv_f32 abs_x_safe = npyv_select_f32(special, one, abs_x);
+
+    /* Subnormal lanes scale into normal range; magic compensates the exponent. */
+    npyv_f32 bit_input = npyv_select_f32(is_subnormal,
+                            npyv_mul_f32(abs_x_safe, scale_up), abs_x_safe);
+    npyv_s32 magic     = npyv_select_s32(is_subnormal, B2, B1);
+
+    /* Initial estimate: t_bits = (bits(bit_input)/3) + magic */
+    npyv_u32 bi_bits   = npyv_reinterpret_u32_f32(bit_input);
+    npyv_f32 hx_f      = npyv__cvt_f32_s32(npyv_reinterpret_s32_u32(bi_bits));
+    npyv_f32 hx_div3_f = npyv_mul_f32(hx_f, third);
+    npyv_s32 t_top     = npyv_add_s32(npyv_round_s32_f32(hx_div3_f), magic);
+    npyv_f32 t         = npyv_reinterpret_f32_s32(t_top);
+
+    /* Halley iter #1: t = t · (t^3 + 2x) / (2·t^3 + x) */
+    npyv_f32 t3   = npyv_mul_f32(npyv_mul_f32(t, t), t);
+    npyv_f32 num1 = npyv_muladd_f32(two, abs_x_safe, t3);
+    npyv_f32 den1 = npyv_muladd_f32(two, t3, abs_x_safe);
+    t = npyv_mul_f32(t, npyv_div_f32(num1, den1));
+
+    /* Halley iter #2 — clears 24-bit mantissa. */
+    t3 = npyv_mul_f32(npyv_mul_f32(t, t), t);
+    npyv_f32 num2 = npyv_muladd_f32(two, abs_x_safe, t3);
+    npyv_f32 den2 = npyv_muladd_f32(two, t3, abs_x_safe);
+    t = npyv_mul_f32(t, npyv_div_f32(num2, den2));
+
+    /* Reapply sign. */
+    npyv_u32 res_bits = npyv_or_u32(npyv_reinterpret_u32_f32(t), sign);
+    npyv_f32 result   = npyv_reinterpret_f32_u32(res_bits);
+
+    /* cbrt(±0) = ±0; cbrt(±inf) = ±inf; cbrt(NaN) = NaN — pass through x. */
+    return npyv_select_f32(special, x, result);
+}
+#endif
+
+#if defined(NPYV_IMPL_F64_EXP_LOG)
+/* cbrt f64: FDLIBM-style bit-magic initial estimate + rational refinement
+ * + one Newton step. Skips exp/log entirely (the previous implementation
+ * paid ~60 ops per element going through exp(log(|x|)/3)).
+ *
+ * Algorithm (FDLIBM s_cbrt.c):
+ *   1. Initial estimate t₀ via bit hack on the top 32 bits of |x|, divide
+ *      by 3, add a magic constant (B1 for normal x, B2 for subnormal),
+ *      shift back. Gives ~5-bit accuracy.
+ *   2. Rational refinement t₁ = t₀·(G + F/(s + E + D/s)) where s = C + t₀³/x.
+ *      Brings the estimate to ~23 bits.
+ *   3. Zero the low 32 bits of t₁ so t₁² is computed exactly; then one Newton
+ *      step → 53 bits.
+ *
+ * Subnormal handling: per FDLIBM, subnormal lanes are pre-scaled by 2^54 to
+ * push the bit-magic input into the normal range, and B2 = B1 - 18·2²⁰ is
+ * used so the result's exponent field accounts for the scale-up (since
+ * cbrt(2^54) = 2^18). The subsequent refinement and Newton step use the
+ * *unscaled* |x| — they self-correct on the original cube-root constraint.
+ *
+ * ±0, ±inf, NaN bypass the kernel via the `special` mask and the lane
+ * passes through `x` itself (cbrt of each equals itself).
+ */
+#define NPYV_HAVE_cbrt_f64 1
+NPY_FINLINE npyv_f64 npyv_cbrt_DOUBLE_kernel(npyv_f64 x)
+{
+    const npyv_f64 zero  = npyv_zero_f64();
+    const npyv_f64 one   = npyv_setall_f64(1.0);
+    const npyv_f64 third = npyv_setall_f64(1.0 / 3.0);
+    /* FDLIBM rational refinement coefficients (k_cbrt.c) */
+    const npyv_f64 C_v = npyv_setall_f64( 5.42857142857142815906e-01); /* 19/35 */
+    const npyv_f64 D_v = npyv_setall_f64(-7.05306122448979611050e-01); /* -864/1225 */
+    const npyv_f64 E_v = npyv_setall_f64( 1.41428571428571436819e+00); /* 99/70 */
+    const npyv_f64 F_v = npyv_setall_f64( 1.60714285714285720630e+00); /* 45/28 */
+    const npyv_f64 G_v = npyv_setall_f64( 3.57142857142857150787e-01); /* 5/14 */
+    /* B1 = (682 - 0.03306235651) · 2²⁰ ≈ 715094163  — normal x */
+    const npyv_f64 B1_f = npyv_setall_f64((double)715094163);
+    /* B2 = (664 - 0.03306235651) · 2²⁰ ≈ 696219795  — subnormal x (× 2^54) */
+    const npyv_f64 B2_f = npyv_setall_f64((double)696219795);
+    /* 2^54 — scales any subnormal into the normal range */
+    const npyv_f64 scale_up = npyv_setall_f64(0x1.0p54);
+    /* smallest normal positive double */
+    const npyv_f64 tiny     = npyv_setall_f64(0x1.0p-1022);
+    const npyv_f64 inf_v    = npyv_setall_f64(NPY_INFINITY);
+
+    /* Strip sign */
+    const npyv_u64 sign_mask = npyv_setall_u64(0x8000000000000000ULL);
+    const npyv_u64 abs_mask  = npyv_setall_u64(0x7FFFFFFFFFFFFFFFULL);
+    const npyv_u64 lo32_mask = npyv_setall_u64(0xFFFFFFFF00000000ULL);
+    npyv_u64 x_bits = npyv_reinterpret_u64_f64(x);
+    npyv_u64 sign   = npyv_and_u64(x_bits, sign_mask);
+    npyv_u64 abs_bits = npyv_and_u64(x_bits, abs_mask);
+    npyv_f64 abs_x = npyv_reinterpret_f64_u64(abs_bits);
+
+    /* Lane classification:
+     *   special = ±0, ±inf, NaN  — passes through `x` at the end
+     *   is_subnormal = nonzero subnormal — gets the scale-up + B2 treatment
+     *   else (normal positive) — uses B1 directly
+     */
+    npyv_b64 is_zero = npyv_cmpeq_f64(abs_x, zero);
+    npyv_b64 not_fin = npyv_cmpge_f64(abs_x, inf_v);
+    npyv_b64 is_nan  = npyv_not_b64(npyv_notnan_f64(x));
+    npyv_b64 special = npyv_or_b64(is_zero, npyv_or_b64(not_fin, is_nan));
+    /* NaN compares false against tiny so it's naturally excluded here; the
+     * AND-NOT-zero filters out exact zero. */
+    npyv_b64 below_tiny    = npyv_cmplt_f64(abs_x, tiny);
+    npyv_b64 is_subnormal  = npyv_and_b64(below_tiny, npyv_not_b64(is_zero));
+
+    /* For computation, mask specials (±0, ±inf, NaN) to 1.0 so the bit-magic
+     * and polynomial stay well-defined; results restored at the end. */
+    npyv_f64 abs_x_safe = npyv_select_f64(special, one, abs_x);
+
+    /* Subnormal lanes: scale to normal range for the bit-magic input.
+     * Normal lanes: use abs_x_safe as is. */
+    npyv_f64 bit_input = npyv_select_f64(is_subnormal,
+                            npyv_mul_f64(abs_x_safe, scale_up), abs_x_safe);
+    /* Magic constant per lane: B2 for subnormals (accounts for the 2^54
+     * scale-up via -18 in the exponent field), B1 otherwise. */
+    npyv_f64 magic = npyv_select_f64(is_subnormal, B2_f, B1_f);
+
+    /* Initial estimate: t = bits_to_double((hx/3 + magic) << 32) */
+    npyv_u64 bit_input_bits = npyv_reinterpret_u64_f64(bit_input);
+    npyv_u64 hx = npyv_shri_u64(bit_input_bits, 32);
+    npyv_f64 hx_f = npyv__cvt_f64_s64(npyv_reinterpret_s64_u64(hx));
+    npyv_f64 hx_div3_f = npyv_floor_f64(npyv_mul_f64(hx_f, third));
+    npyv_f64 top_f = npyv_add_f64(hx_div3_f, magic);
+    npyv_s64 top_s = npyv__cvt_s64_f64(top_f);
+    npyv_u64 t_bits = npyv_shli_u64(npyv_reinterpret_u64_s64(top_s), 32);
+    npyv_f64 t = npyv_reinterpret_f64_u64(t_bits);
+
+    /* Rational refinement uses the UNSCALED abs_x_safe (the actual |x|).
+     * The cube-root constraint t³ ≈ x is what's being refined. */
+    npyv_f64 r = npyv_div_f64(npyv_mul_f64(t, t), abs_x_safe);
+    npyv_f64 s = npyv_muladd_f64(r, t, C_v);
+    npyv_f64 denom = npyv_add_f64(npyv_add_f64(s, E_v), npyv_div_f64(D_v, s));
+    t = npyv_mul_f64(t, npyv_add_f64(G_v, npyv_div_f64(F_v, denom)));
+
+    /* Truncate t's low 32 bits so t² is exact in the Newton step. */
+    t = npyv_reinterpret_f64_u64(
+            npyv_and_u64(npyv_reinterpret_u64_f64(t), lo32_mask));
+
+    /* Newton iteration to 53 bits, again on the unscaled abs_x_safe. */
+    npyv_f64 s2 = npyv_mul_f64(t, t);
+    npyv_f64 r2 = npyv_div_f64(abs_x_safe, s2);
+    npyv_f64 w  = npyv_add_f64(t, t);
+    npyv_f64 r3 = npyv_div_f64(npyv_sub_f64(r2, t), npyv_add_f64(w, r2));
+    t = npyv_muladd_f64(t, r3, t);
+
+    /* Re-apply sign by OR-ing the original sign bit. */
+    npyv_u64 result_bits = npyv_or_u64(npyv_reinterpret_u64_f64(t), sign);
+    npyv_f64 result = npyv_reinterpret_f64_u64(result_bits);
+
+    /* Special lanes: cbrt(±0) = ±0; cbrt(±inf) = ±inf; cbrt(NaN) = NaN. */
+    return npyv_select_f64(special, x, result);
+}
+#endif
+
+/* Contiguous drivers for the Tier-1 NPYV kernels. */
+/**begin repeat
+ *  #TYPE  = FLOAT,     DOUBLE#
+ *  #type  = npy_float, npy_double#
+ *  #sfx   = f32,       f64#
+ *  #vsub  = f, #
+ */
+/**begin repeat1
+ *  #intrin = sinh, cosh, exp2, log2, log10, asinh, acosh, atanh, log1p, expm1, atan, asin, acos, cbrt, tan, tanh#
+ */
+#if defined(NPYV_HAVE_@intrin@_@sfx@)
+static void
+simd_@intrin@_@sfx@_npyv(const @type@ *src, @type@ *dst, npy_intp n)
+{
+    const int lanes = npyv_nlanes_@sfx@;
+    npy_intp i = 0;
+    for (; i + lanes <= n; i += lanes) {
+        npyv_@sfx@ v = npyv_load_@sfx@(src + i);
+        npyv_store_@sfx@(dst + i, npyv_@intrin@_@TYPE@_kernel(v));
+    }
+    for (; i < n; i++) {
+        dst[i] = npy_@intrin@@vsub@(src[i]);
+    }
+}
+#endif
+/**end repeat1**/
+/**end repeat**/
+
 /**begin repeat
  *  #TYPE = DOUBLE, FLOAT#
  *  #type = npy_double, npy_float#
@@ -107,6 +1149,8 @@ simd_@func@_@sfx@(const npyv_lanetype_@sfx@ *src1, npy_intp ssrc1,
  *  #func = exp2, log2, log10, expm1, log1p, cbrt, tan, arcsin, arccos, arctan, sinh, cosh, arcsinh, arccosh, arctanh#
  *  #intrin = exp2, log2, log10, expm1, log1p, cbrt, tan, asin, acos, atan, sinh, cosh, asinh, acosh, atanh#
  */
+/* NOTE: log1p/expm1 NPYV kernels are now available — picked up by the
+ * NPYV_HAVE_@intrin@_@sfx@ check below. */
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@func@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
@@ -125,6 +1169,12 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@func@)
         simd_@intrin@_@sfx@(src, ssrc, dst, sdst, len);
         return;
     }
+#elif defined(NPYV_HAVE_@intrin@_@sfx@)
+    if (steps[0] == sizeof(@type@) && steps[1] == sizeof(@type@)) {
+        simd_@intrin@_@sfx@_npyv(
+            (const @type@ *)args[0], (@type@ *)args[1], dimensions[0]);
+        return;
+    }
 #endif
     UNARY_LOOP {
         const @type@ in1 = *(@type@ *)ip1;
@@ -133,6 +1183,243 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@func@)
 }
 /**end repeat1**/
 /**end repeat**/
+
+/* tanh dispatcher. Definition only emitted when the NPYV exp/log path is
+ * compiled in (currently LSX/LASX) — for other targets, the symbol comes
+ * from loops_hyperbolic.dispatch.cpp.src (Highway SVML port). */
+/**begin repeat
+ *  #TYPE = DOUBLE, FLOAT#
+ *  #type = npy_double, npy_float#
+ *  #vsub = , f#
+ *  #sfx  = f64, f32#
+ */
+#if defined(NPYV_HAVE_tanh_@sfx@)
+NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_tanh)
+(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
+{
+    if (steps[0] == sizeof(@type@) && steps[1] == sizeof(@type@)) {
+        simd_tanh_@sfx@_npyv(
+            (const @type@ *)args[0], (@type@ *)args[1], dimensions[0]);
+        return;
+    }
+    UNARY_LOOP {
+        const @type@ in1 = *(@type@ *)ip1;
+        *(@type@ *)op1 = npy_tanh@vsub@(in1);
+    }
+}
+#endif
+/**end repeat**/
+
+/* ============================================================================
+ * power(x, y) = x^y
+ *
+ * General path: |x|^y = exp(y · log(|x|)).
+ * Then a chain of special-case overrides per IEEE 754 / C99 pow():
+ *   - x < 0, y odd integer:   negate the magnitude
+ *   - x < 0, y non-integer:   NaN (INVALID)
+ *   - pow(x, ±inf):           {0, 1, inf} depending on |x| vs 1
+ *   - pow(0, y):              {0 if y>0, +inf if y<0}; pow(±0, neg odd y) gives ±inf
+ *   - pow(±inf, y):           handled by the formula (log(inf)=inf, exp(±inf) saturates)
+ *   - pow(x, 0)   = 1  (even for NaN x)
+ *   - pow(1, y)   = 1  (even for NaN y)
+ *   - NaN propagation otherwise
+ *
+ * To keep the formula from raising spurious FP flags:
+ *   - x = 0 lanes are masked to |x|=1 before the log (log(0) would yield -inf)
+ *   - |x|=1 lanes have y masked to 0 before y*log(|x|) (0·±inf = NaN with INVALID)
+ *   - y non-finite lanes are masked to 0 before the int-conversion / parity check
+ *     (round_s32_f32(inf) saturates with INVALID)
+ *
+ * The y huge-integer case (y > 2^31) loses parity information from the int32
+ * round; acceptable for typical workloads, will be silently incorrect for
+ * pow(-2, 2^32). A 64-bit parity check would fix it.
+ * ============================================================================ */
+#if defined(NPYV_IMPL_F32_EXP_LOG)
+#define NPYV_HAVE_pow_f32 1
+NPY_FINLINE npyv_f32 npyv_pow_FLOAT_kernel(npyv_f32 x, npyv_f32 y)
+{
+    const npyv_f32 zero    = npyv_zero_f32();
+    const npyv_f32 one     = npyv_setall_f32(1.0f);
+    const npyv_f32 nan     = npyv_setall_f32(NPY_NANF);
+    const npyv_f32 inf     = npyv_setall_f32(NPY_INFINITYF);
+    const npyv_f32 neg_inf = npyv_setall_f32(-NPY_INFINITYF);
+
+    /* Per-block fast path: all x positive finite, all y finite non-zero, no
+     * lane equals 1. Then result = exp(y·log(x)) with no special-case dance. */
+    npyv_f32 abs_y_fast = npyv_abs_f32(y);
+    npyv_b32 x_pos_fin  = npyv_and_b8(npyv_cmpgt_f32(x, zero),
+                                      npyv_cmplt_f32(x, inf));
+    npyv_b32 y_fin_nz   = npyv_and_b8(npyv_notnan_f32(y),
+                                      npyv_and_b8(npyv_cmplt_f32(abs_y_fast, inf),
+                                                  npyv_cmpneq_f32(y, zero)));
+    npyv_b32 x_not_one  = npyv_cmpneq_f32(x, one);
+    npyv_b32 fast_ok    = npyv_and_b8(x_pos_fin,
+                                      npyv_and_b8(y_fin_nz, x_not_one));
+    if (NPY_LIKELY(npyv_all_b32(fast_ok))) {
+        npyv_f32 lx  = npyv_log_FLOAT_kernel(x);
+        npyv_f32 ylx = npyv_mul_f32(y, lx);
+        return npyv_exp_FLOAT_kernel(ylx);
+    }
+
+    npyv_b32 x_notnan = npyv_notnan_f32(x);
+    npyv_b32 y_notnan = npyv_notnan_f32(y);
+    npyv_b32 not_nan  = npyv_and_b8(x_notnan, y_notnan);
+    npyv_f32 abs_x = npyv_abs_f32(x);
+    npyv_f32 abs_y = npyv_abs_f32(y);
+    npyv_b32 x_is_zero = npyv_cmpeq_f32(x, zero);
+    npyv_b32 x_is_neg  = npyv_cmplt_f32(x, zero);
+    npyv_b32 x_is_one  = npyv_cmpeq_f32(x, one);
+    npyv_b32 abs_x_one = npyv_cmpeq_f32(abs_x, one);
+    npyv_b32 abs_x_gt1 = npyv_cmpgt_f32(abs_x, one);
+    npyv_b32 abs_x_lt1 = npyv_cmplt_f32(abs_x, one);
+    npyv_b32 y_is_zero = npyv_cmpeq_f32(y, zero);
+    npyv_b32 y_is_pos  = npyv_cmpgt_f32(y, zero);
+    npyv_b32 y_pos_inf = npyv_cmpeq_f32(y, inf);
+    npyv_b32 y_neg_inf = npyv_cmpeq_f32(y, neg_inf);
+    /* y finite (not NaN, not ±inf) for safe int conversion */
+    npyv_b32 y_is_finite = npyv_and_b8(y_notnan, npyv_cmplt_f32(abs_y, inf));
+
+    /* Integer / parity check on y. Mask y to 0 for non-finite lanes so the
+     * round-to-int doesn't saturate with INVALID. */
+    npyv_f32 y_for_int = npyv_select_f32(y_is_finite, y, zero);
+    npyv_f32 y_rounded = npyv_rint_f32(y_for_int);
+    npyv_b32 y_is_int = npyv_and_b8(y_is_finite, npyv_cmpeq_f32(y_for_int, y_rounded));
+    npyv_s32 y_int = npyv_round_s32_f32(y_for_int);
+    npyv_s32 y_int_lsb = npyv_and_s32(y_int, npyv_setall_s32(1));
+    npyv_b32 y_is_odd_int = npyv_and_b8(y_is_int,
+        npyv_cmpneq_s32(y_int_lsb, npyv_setall_s32(0)));
+
+    /* General formula: exp(y · log(|x|)). Avoid spurious flags by masking
+     * x=0 to |x|=1 (log domain) and |x|=1 lanes' y to 0 (0·inf trap). */
+    npyv_f32 abs_x_safe = npyv_select_f32(x_is_zero, one, abs_x);
+    npyv_f32 log_x = npyv_log_FLOAT_kernel(abs_x_safe);
+    npyv_f32 y_safe = npyv_select_f32(abs_x_one, zero, y);
+    npyv_f32 y_log_x = npyv_mul_f32(y_safe, log_x);
+    npyv_f32 result = npyv_exp_FLOAT_kernel(y_log_x);
+
+    /* Negate for x<0, y odd integer */
+    npyv_b32 neg_sign = npyv_and_b8(x_is_neg, y_is_odd_int);
+    result = npyv_select_f32(neg_sign, npyv_sub_f32(zero, result), result);
+
+    /* x<0 and non-integer y → NaN */
+    npyv_b32 nan_case = npyv_and_b8(x_is_neg, npyv_not_b32(y_is_int));
+    result = npyv_select_f32(nan_case, nan, result);
+
+    /* pow(x, ±inf) overrides (must come before x=0 to handle 0^inf = 0
+     * via the |x|<1 → 0 branch) */
+    npyv_f32 pos_inf_res = npyv_select_f32(abs_x_gt1, inf,
+                          npyv_select_f32(abs_x_lt1, zero, one));
+    npyv_f32 neg_inf_res = npyv_select_f32(abs_x_gt1, zero,
+                          npyv_select_f32(abs_x_lt1, inf, one));
+    result = npyv_select_f32(y_pos_inf, pos_inf_res, result);
+    result = npyv_select_f32(y_neg_inf, neg_inf_res, result);
+
+    /* pow(±0, y_finite): y>0 → ±0; y<0 → ±inf (sign-preserved for odd y) */
+    npyv_f32 pow_zero_res = npyv_select_f32(y_is_pos, zero, inf);
+    /* Sign of result follows sign of x for odd integer y */
+    npyv_f32 pow_zero_signed = npyv_select_f32(neg_sign,
+        npyv_sub_f32(zero, pow_zero_res), pow_zero_res);
+    result = npyv_select_f32(x_is_zero, pow_zero_signed, result);
+
+    /* NaN propagation */
+    result = npyv_select_f32(not_nan, result, nan);
+
+    /* pow(x, 0) = 1 and pow(1, y) = 1 — both beat NaN per IEEE 754 */
+    result = npyv_select_f32(y_is_zero, one, result);
+    result = npyv_select_f32(x_is_one, one, result);
+
+    return result;
+}
+#endif
+
+#if defined(NPYV_IMPL_F64_EXP_LOG)
+#define NPYV_HAVE_pow_f64 1
+NPY_FINLINE npyv_f64 npyv_pow_DOUBLE_kernel(npyv_f64 x, npyv_f64 y)
+{
+    const npyv_f64 zero    = npyv_zero_f64();
+    const npyv_f64 one     = npyv_setall_f64(1.0);
+    const npyv_f64 nan     = npyv_setall_f64(NPY_NAN);
+    const npyv_f64 inf     = npyv_setall_f64(NPY_INFINITY);
+    const npyv_f64 neg_inf = npyv_setall_f64(-NPY_INFINITY);
+
+    /* Per-block fast path: all x positive finite, all y finite non-zero, no
+     * lane equals 1. Then result = exp(y·log(x)) with no special-case dance. */
+    npyv_f64 abs_y_fast = npyv_abs_f64(y);
+    npyv_b64 x_pos_fin  = npyv_and_b8(npyv_cmpgt_f64(x, zero),
+                                      npyv_cmplt_f64(x, inf));
+    npyv_b64 y_fin_nz   = npyv_and_b8(npyv_notnan_f64(y),
+                                      npyv_and_b8(npyv_cmplt_f64(abs_y_fast, inf),
+                                                  npyv_cmpneq_f64(y, zero)));
+    npyv_b64 x_not_one  = npyv_cmpneq_f64(x, one);
+    npyv_b64 fast_ok    = npyv_and_b8(x_pos_fin,
+                                      npyv_and_b8(y_fin_nz, x_not_one));
+    if (NPY_LIKELY(npyv_all_b64(fast_ok))) {
+        npyv_f64 lx  = npyv_log_DOUBLE_kernel(x);
+        npyv_f64 ylx = npyv_mul_f64(y, lx);
+        return npyv_exp_DOUBLE_kernel(ylx);
+    }
+
+    npyv_b64 x_notnan = npyv_notnan_f64(x);
+    npyv_b64 y_notnan = npyv_notnan_f64(y);
+    npyv_b64 not_nan  = npyv_and_b8(x_notnan, y_notnan);
+    npyv_f64 abs_x = npyv_abs_f64(x);
+    npyv_f64 abs_y = npyv_abs_f64(y);
+    npyv_b64 x_is_zero = npyv_cmpeq_f64(x, zero);
+    npyv_b64 x_is_neg  = npyv_cmplt_f64(x, zero);
+    npyv_b64 x_is_one  = npyv_cmpeq_f64(x, one);
+    npyv_b64 abs_x_one = npyv_cmpeq_f64(abs_x, one);
+    npyv_b64 abs_x_gt1 = npyv_cmpgt_f64(abs_x, one);
+    npyv_b64 abs_x_lt1 = npyv_cmplt_f64(abs_x, one);
+    npyv_b64 y_is_zero = npyv_cmpeq_f64(y, zero);
+    npyv_b64 y_is_pos  = npyv_cmpgt_f64(y, zero);
+    npyv_b64 y_pos_inf = npyv_cmpeq_f64(y, inf);
+    npyv_b64 y_neg_inf = npyv_cmpeq_f64(y, neg_inf);
+    npyv_b64 y_is_finite = npyv_and_b8(y_notnan, npyv_cmplt_f64(abs_y, inf));
+
+    npyv_f64 y_for_int = npyv_select_f64(y_is_finite, y, zero);
+    npyv_f64 y_rounded = npyv_rint_f64(y_for_int);
+    npyv_b64 y_is_int = npyv_and_b8(y_is_finite, npyv_cmpeq_f64(y_for_int, y_rounded));
+    /* For odd parity, look at low bit of the integer part via float math:
+     *   y/2 - rint(y/2) is 0 iff y is an even integer, ±0.5 iff odd. */
+    npyv_f64 half_y = npyv_mul_f64(y_for_int, npyv_setall_f64(0.5));
+    npyv_f64 half_y_round = npyv_rint_f64(half_y);
+    npyv_f64 frac = npyv_sub_f64(half_y, half_y_round);
+    npyv_b64 y_is_odd_int = npyv_and_b8(y_is_int,
+        npyv_cmpneq_f64(frac, zero));
+
+    npyv_f64 abs_x_safe = npyv_select_f64(x_is_zero, one, abs_x);
+    npyv_f64 log_x = npyv_log_DOUBLE_kernel(abs_x_safe);
+    npyv_f64 y_safe = npyv_select_f64(abs_x_one, zero, y);
+    npyv_f64 y_log_x = npyv_mul_f64(y_safe, log_x);
+    npyv_f64 result = npyv_exp_DOUBLE_kernel(y_log_x);
+
+    npyv_b64 neg_sign = npyv_and_b8(x_is_neg, y_is_odd_int);
+    result = npyv_select_f64(neg_sign, npyv_sub_f64(zero, result), result);
+
+    npyv_b64 nan_case = npyv_and_b8(x_is_neg, npyv_not_b32(y_is_int));
+    result = npyv_select_f64(nan_case, nan, result);
+
+    npyv_f64 pos_inf_res = npyv_select_f64(abs_x_gt1, inf,
+                          npyv_select_f64(abs_x_lt1, zero, one));
+    npyv_f64 neg_inf_res = npyv_select_f64(abs_x_gt1, zero,
+                          npyv_select_f64(abs_x_lt1, inf, one));
+    result = npyv_select_f64(y_pos_inf, pos_inf_res, result);
+    result = npyv_select_f64(y_neg_inf, neg_inf_res, result);
+
+    npyv_f64 pow_zero_res = npyv_select_f64(y_is_pos, zero, inf);
+    npyv_f64 pow_zero_signed = npyv_select_f64(neg_sign,
+        npyv_sub_f64(zero, pow_zero_res), pow_zero_res);
+    result = npyv_select_f64(x_is_zero, pow_zero_signed, result);
+
+    result = npyv_select_f64(not_nan, result, nan);
+
+    result = npyv_select_f64(y_is_zero, one, result);
+    result = npyv_select_f64(x_is_one, one, result);
+
+    return result;
+}
+#endif
+
 
 /**begin repeat
  *  #TYPE = DOUBLE, FLOAT#
@@ -199,6 +1486,26 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@func@)
         simd_@intrin@_@sfx@(src1, ssrc1, src2, ssrc2, dst, sdst, len);
         return;
     }
+#elif defined(NPYV_HAVE_pow_@sfx@)
+    if (steps[0] == sizeof(@type@) && steps[1] == sizeof(@type@) &&
+        steps[2] == sizeof(@type@) &&
+        !is_mem_overlap(args[0], steps[0], args[2], steps[2], dimensions[0]) &&
+        !is_mem_overlap(args[1], steps[1], args[2], steps[2], dimensions[0])) {
+        const @type@ *xa = (const @type@ *)args[0];
+        const @type@ *ya = (const @type@ *)args[1];
+        @type@ *da = (@type@ *)args[2];
+        const int lanes = npyv_nlanes_@sfx@;
+        npy_intp i = 0, n = dimensions[0];
+        for (; i + lanes <= n; i += lanes) {
+            npyv_@sfx@ vx = npyv_load_@sfx@(xa + i);
+            npyv_@sfx@ vy = npyv_load_@sfx@(ya + i);
+            npyv_store_@sfx@(da + i, npyv_pow_@TYPE@_kernel(vx, vy));
+        }
+        for (; i < n; i++) {
+            da[i] = npy_pow@vsub@(xa[i], ya[i]);
+        }
+        return;
+    }
 #endif
     BINARY_LOOP {
         const @type@ in1 = *(@type@ *)ip1;
@@ -207,6 +1514,23 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@func@)
     }
 }
 /**end repeat1**/
+/* NPYV contiguous driver for binary atan2. */
+#if defined(NPYV_HAVE_atan2_@sfx@)
+static void
+simd_atan2_@sfx@_npyv(const @type@ *y, const @type@ *x, @type@ *dst, npy_intp n)
+{
+    const int lanes = npyv_nlanes_@sfx@;
+    npy_intp i = 0;
+    for (; i + lanes <= n; i += lanes) {
+        npyv_@sfx@ vy = npyv_load_@sfx@(y + i);
+        npyv_@sfx@ vx = npyv_load_@sfx@(x + i);
+        npyv_store_@sfx@(dst + i, npyv_atan2_@TYPE@_kernel(vy, vx));
+    }
+    for (; i < n; i++) {
+        dst[i] = npy_atan2@vsub@(y[i], x[i]);
+    }
+}
+#endif
 
 /**begin repeat1
  *  #func = arctan2#
@@ -233,6 +1557,16 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@func@)
         const npy_intp sdst  = steps[2] / sizeof(@type@);
 
         simd_@intrin@_@sfx@(src1, ssrc1, src2, ssrc2, dst, sdst, len);
+        return;
+    }
+#elif defined(NPYV_HAVE_atan2_@sfx@)
+    if (steps[0] == sizeof(@type@) && steps[1] == sizeof(@type@) &&
+        steps[2] == sizeof(@type@) &&
+        !is_mem_overlap(args[0], steps[0], args[2], steps[2], dimensions[0]) &&
+        !is_mem_overlap(args[1], steps[1], args[2], steps[2], dimensions[0])) {
+        simd_atan2_@sfx@_npyv(
+            (const @type@ *)args[0], (const @type@ *)args[1],
+            (@type@ *)args[2], dimensions[0]);
         return;
     }
 #endif

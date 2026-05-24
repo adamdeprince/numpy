@@ -329,6 +329,10 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void HALF_@func@,
 
 /**end repeat**/
 
+// power and arctan2 also live in loops_umath_fp.dispatch.c.src, so their
+// dispatch list must come from there — not from the loops_half include above.
+// Re-include to restore the dispatch macros before declaring them.
+#include "loops_umath_fp.dispatch.h"
 /**begin repeat
  *  #TYPE = FLOAT, DOUBLE#
  */

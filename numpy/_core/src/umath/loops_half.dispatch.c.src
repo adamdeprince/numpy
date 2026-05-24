@@ -64,6 +64,50 @@ avx512_@func@_f16(const npy_half *src, npy_half *dst, npy_intp len)
 /**end repeat**/
 #endif // NPY__SVML_IS_ENABLED
 
+/*
+ * LoongArch LASX f16↔f32 bridge.
+ *
+ * LASX has native f16→f32 widening (xvfcvtl_s_h / xvfcvth_s_h) and a
+ * f32→f16 pack (xvfcvt_h_s). Wrapping our existing f32 NPYV kernels
+ * with those conversions turns f16 ufuncs into "load 16 f16 → split
+ * to two f32 vectors → run f32 kernel twice → pack to 16 f16 → store".
+ * The pack/unpack pair costs about 3 cycles per block, so f16 ops
+ * effectively run at f32-NPYV speed instead of the per-element scalar
+ * `npy_half_to_float → libm → npy_float_to_half` path used elsewhere.
+ *
+ * Only enabled for ops whose f32 NPYV kernel is already available
+ * through a shared header (npyv_exp_log.h today). Other f16 ops keep
+ * the scalar fallback for now.
+ */
+#if NPY_SIMD && defined(__loongarch__) && defined(__loongarch_asx)
+#include "npyv_f16_bridge.h"
+#include "npyv_exp_log.h"
+#include "npyv_f16_kernels.h"
+
+typedef npyv_f32 (*npyv__f16_bridge_unary_t)(npyv_f32);
+
+static void
+npyv__f16_bridge_unary(const npy_half *src, npy_half *dst, npy_intp len,
+                       npyv__f16_bridge_unary_t kern,
+                       npy_float (*scalar_fn)(npy_float))
+{
+    const int lanes = NPYV_NLANES_F16;
+    npy_intp i = 0;
+    for (; i + lanes <= len; i += lanes) {
+        npyv_f16 v = npyv_load_f16(src + i);
+        npyv_f32 lo = npyv_f16_to_f32_lo(v);
+        npyv_f32 hi = npyv_f16_to_f32_hi(v);
+        npyv_f32 lo_r = kern(lo);
+        npyv_f32 hi_r = kern(hi);
+        npyv_store_f16(dst + i, npyv_f32_to_f16(hi_r, lo_r));
+    }
+    for (; i < len; i++) {
+        npy_float in = npy_half_to_float(src[i]);
+        dst[i] = npy_float_to_half(scalar_fn(in));
+    }
+}
+#endif  /* loongarch + LASX */
+
 /**begin repeat
  *  #func = sin, cos, tan, exp, exp2, expm1, log, log2, log10, log1p, cbrt, arcsin, arccos, arctan, sinh, cosh, tanh, arcsinh, arccosh, arctanh#
  *  #intrin = sin, cos, tan, exp, exp2, expm1, log, log2, log10, log1p, cbrt, asin, acos, atan, sinh, cosh, tanh, asinh, acosh, atanh#
@@ -83,7 +127,14 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_@func@)
         avx512_@intrin@_f16(src, dst, len);
         return;
     }
-#endif // NPY__SVML_IS_ENABLED
+#elif NPY_SIMD && defined(__loongarch__) && defined(__loongarch_asx) && defined(NPYV_HAVE_@intrin@_f32)
+    if (steps[0] == sizeof(npy_half) && steps[1] == sizeof(npy_half)) {
+        npyv__f16_bridge_unary(
+            (const npy_half *)args[0], (npy_half *)args[1], dimensions[0],
+            &npyv_@intrin@_FLOAT_kernel, &npy_@intrin@f);
+        return;
+    }
+#endif // NPY__SVML_IS_ENABLED / LoongArch LASX
     UNARY_LOOP {
         const npy_float in1 = npy_half_to_float(*(npy_half *)ip1);
         *((npy_half *)op1) = npy_float_to_half(npy_@intrin@f(in1));

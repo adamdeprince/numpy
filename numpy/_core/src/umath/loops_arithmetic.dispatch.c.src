@@ -319,6 +319,164 @@ vsx4_simd_divide_contig_@sfx@(char **args, npy_intp len)
 }
 /**end repeat**/
 #endif // NPY_HAVE_VSX4
+
+/*
+ * LoongArch LSX / LASX vector-by-vector floor_divide.
+ *
+ * loops_modulo.dispatch.c.src already has the equivalent LoongArch
+ * SIMD kernel for fmod / remainder / divmod (commit e6acbf145b).
+ * floor_divide lives here, so we mirror that work for the divide ufunc.
+ *
+ * Unlike VSX4 (only 32/64-bit integer divide), LoongArch has direct
+ * div/mod for all four widths (8/16/32/64-bit, signed and unsigned),
+ * so the kernel is just "load, divide, fix the Python floor sign,
+ * store" with no width-expansion gymnastics.
+ */
+#if defined(NPY_HAVE_LASX) || defined(NPY_HAVE_LSX)
+
+#if defined(NPY_HAVE_LASX)
+    #define loongarch_arith_div_s8(a, b)  ((npyv_s8)__lasx_xvdiv_b((__m256i)(a), (__m256i)(b)))
+    #define loongarch_arith_div_u8(a, b)  ((npyv_u8)__lasx_xvdiv_bu((__m256i)(a), (__m256i)(b)))
+    #define loongarch_arith_div_s16(a, b) ((npyv_s16)__lasx_xvdiv_h((__m256i)(a), (__m256i)(b)))
+    #define loongarch_arith_div_u16(a, b) ((npyv_u16)__lasx_xvdiv_hu((__m256i)(a), (__m256i)(b)))
+    #define loongarch_arith_div_s32(a, b) ((npyv_s32)__lasx_xvdiv_w((__m256i)(a), (__m256i)(b)))
+    #define loongarch_arith_div_u32(a, b) ((npyv_u32)__lasx_xvdiv_wu((__m256i)(a), (__m256i)(b)))
+    #define loongarch_arith_div_s64(a, b) ((npyv_s64)__lasx_xvdiv_d((__m256i)(a), (__m256i)(b)))
+    #define loongarch_arith_div_u64(a, b) ((npyv_u64)__lasx_xvdiv_du((__m256i)(a), (__m256i)(b)))
+    #define loongarch_arith_mul_s8  npyv_mul_u8
+    #define loongarch_arith_mul_s16 npyv_mul_u16
+    #define loongarch_arith_mul_s32 npyv_mul_u32
+    #define loongarch_arith_mul_s64(a, b) ((npyv_s64)__lasx_xvmul_d((__m256i)(a), (__m256i)(b)))
+#else /* LSX */
+    #define loongarch_arith_div_s8(a, b)  ((npyv_s8)__lsx_vdiv_b((__m128i)(a), (__m128i)(b)))
+    #define loongarch_arith_div_u8(a, b)  ((npyv_u8)__lsx_vdiv_bu((__m128i)(a), (__m128i)(b)))
+    #define loongarch_arith_div_s16(a, b) ((npyv_s16)__lsx_vdiv_h((__m128i)(a), (__m128i)(b)))
+    #define loongarch_arith_div_u16(a, b) ((npyv_u16)__lsx_vdiv_hu((__m128i)(a), (__m128i)(b)))
+    #define loongarch_arith_div_s32(a, b) ((npyv_s32)__lsx_vdiv_w((__m128i)(a), (__m128i)(b)))
+    #define loongarch_arith_div_u32(a, b) ((npyv_u32)__lsx_vdiv_wu((__m128i)(a), (__m128i)(b)))
+    #define loongarch_arith_div_s64(a, b) ((npyv_s64)__lsx_vdiv_d((__m128i)(a), (__m128i)(b)))
+    #define loongarch_arith_div_u64(a, b) ((npyv_u64)__lsx_vdiv_du((__m128i)(a), (__m128i)(b)))
+    #define loongarch_arith_mul_s8  npyv_mul_u8
+    #define loongarch_arith_mul_s16 npyv_mul_u16
+    #define loongarch_arith_mul_s32 npyv_mul_u32
+    #define loongarch_arith_mul_s64(a, b) ((npyv_s64)__lsx_vmul_d((__m128i)(a), (__m128i)(b)))
+#endif
+
+/**begin repeat
+ * Unsigned types
+ * #sfx = u8, u16, u32, u64#
+ * #len = 8,  16,  32,  64#
+ */
+static inline void
+loongarch_simd_divide_contig_@sfx@(char **args, npy_intp len)
+{
+    npyv_lanetype_@sfx@ *src1 = (npyv_lanetype_@sfx@ *) args[0];
+    npyv_lanetype_@sfx@ *src2 = (npyv_lanetype_@sfx@ *) args[1];
+    npyv_lanetype_@sfx@ *dst1 = (npyv_lanetype_@sfx@ *) args[2];
+    const npyv_@sfx@ vzero = npyv_zero_@sfx@();
+    const int vstep = npyv_nlanes_@sfx@;
+
+    for (; len >= vstep; len -= vstep, src1 += vstep, src2 += vstep,
+         dst1 += vstep) {
+        npyv_@sfx@ a = npyv_load_@sfx@(src1);
+        npyv_@sfx@ b = npyv_load_@sfx@(src2);
+        npyv_b@len@ bzero = npyv_cmpeq_@sfx@(b, vzero);
+        npyv_@sfx@ b_safe = npyv_select_@sfx@(bzero, npyv_setall_@sfx@(1), b);
+        npyv_@sfx@ q = loongarch_arith_div_@sfx@(a, b_safe);
+        q = npyv_select_@sfx@(bzero, vzero, q);
+        npyv_store_@sfx@(dst1, q);
+        if (NPY_UNLIKELY(npyv_any_b@len@(bzero))) {
+            npy_set_floatstatus_divbyzero();
+        }
+    }
+    for (; len > 0; --len, ++src1, ++src2, ++dst1) {
+        const npyv_lanetype_@sfx@ a = *src1;
+        const npyv_lanetype_@sfx@ b = *src2;
+        if (NPY_UNLIKELY(b == 0)) {
+            npy_set_floatstatus_divbyzero();
+            *dst1 = 0;
+        } else {
+            *dst1 = a / b;
+        }
+    }
+    npyv_cleanup();
+}
+/**end repeat**/
+
+/**begin repeat
+ * Signed types
+ * #sfx = s8, s16, s32, s64#
+ * #len = 8,  16,  32,  64#
+ */
+static inline void
+loongarch_simd_divide_contig_@sfx@(char **args, npy_intp len)
+{
+    npyv_lanetype_@sfx@ *src1 = (npyv_lanetype_@sfx@ *) args[0];
+    npyv_lanetype_@sfx@ *src2 = (npyv_lanetype_@sfx@ *) args[1];
+    npyv_lanetype_@sfx@ *dst1 = (npyv_lanetype_@sfx@ *) args[2];
+    const npyv_@sfx@ vneg_one = npyv_setall_@sfx@(-1);
+    const npyv_@sfx@ vzero = npyv_zero_@sfx@();
+    const npyv_@sfx@ vmin = npyv_setall_@sfx@(NPY_MIN_INT@len@);
+    npyv_b@len@ warn_zero = npyv_cvt_b@len@_@sfx@(npyv_zero_@sfx@());
+    npyv_b@len@ warn_overflow = npyv_cvt_b@len@_@sfx@(npyv_zero_@sfx@());
+    const int vstep = npyv_nlanes_@sfx@;
+
+    for (; len >= vstep; len -= vstep, src1 += vstep, src2 += vstep,
+         dst1 += vstep) {
+        npyv_@sfx@ a = npyv_load_@sfx@(src1);
+        npyv_@sfx@ b = npyv_load_@sfx@(src2);
+        npyv_b@len@ bzero = npyv_cmpeq_@sfx@(b, vzero);
+        npyv_@sfx@ b_safe = npyv_select_@sfx@(bzero, npyv_setall_@sfx@(1), b);
+        npyv_@sfx@ q = loongarch_arith_div_@sfx@(a, b_safe);
+        npyv_@sfx@ r = npyv_sub_@sfx@(a, loongarch_arith_mul_@sfx@(b_safe, q));
+        /* INT_MIN / -1 overflow flag */
+        npyv_b@len@ amin = npyv_cmpeq_@sfx@(a, vmin);
+        npyv_b@len@ bneg_one = npyv_cmpeq_@sfx@(b, vneg_one);
+        npyv_b@len@ overflow = npyv_and_@sfx@(bneg_one, amin);
+        warn_zero = npyv_or_@sfx@(bzero, warn_zero);
+        warn_overflow = npyv_or_@sfx@(overflow, warn_overflow);
+        /* Python floor: if signs of a and b differ and r != 0, q -= 1. */
+        npyv_b@len@ a_gt_zero = npyv_cmpgt_@sfx@(a, vzero);
+        npyv_b@len@ b_gt_zero = npyv_cmpgt_@sfx@(b, vzero);
+        npyv_b@len@ ab_eq_cond = npyv_cmpeq_@sfx@(a_gt_zero, b_gt_zero);
+        npyv_b@len@ rem_zero = npyv_cmpeq_@sfx@(r, vzero);
+        npyv_b@len@ keep = npyv_or_@sfx@(ab_eq_cond, rem_zero);
+        npyv_@sfx@ to_sub = npyv_select_@sfx@(keep, vzero, vneg_one);
+        q = npyv_add_@sfx@(q, to_sub);
+        /* div-by-zero correction */
+        q = npyv_select_@sfx@(bzero, vzero, q);
+        /* INT_MIN / -1 → INT_MIN (and flag overflow) */
+        q = npyv_select_@sfx@(overflow, vmin, q);
+        npyv_store_@sfx@(dst1, q);
+    }
+
+    if (npyv_any_b@len@(warn_zero)) {
+        npy_set_floatstatus_divbyzero();
+    }
+    if (npyv_any_b@len@(warn_overflow)) {
+        npy_set_floatstatus_overflow();
+    }
+
+    for (; len > 0; --len, ++src1, ++src2, ++dst1) {
+        const npyv_lanetype_@sfx@ a = *src1;
+        const npyv_lanetype_@sfx@ b = *src2;
+        if (NPY_UNLIKELY(b == 0)) {
+            npy_set_floatstatus_divbyzero();
+            *dst1 = 0;
+        } else if (NPY_UNLIKELY((a == NPY_MIN_INT@len@) && (b == -1))) {
+            npy_set_floatstatus_overflow();
+            *dst1 = NPY_MIN_INT@len@;
+        } else {
+            npyv_lanetype_@sfx@ q = a / b;
+            if (((a > 0) != (b > 0)) && ((q * b) != a)) q--;
+            *dst1 = q;
+        }
+    }
+    npyv_cleanup();
+}
+/**end repeat**/
+
+#endif /* NPY_HAVE_LASX || NPY_HAVE_LSX */
 #endif // NPY_SIMD
 
 /********************************************************************************
@@ -385,6 +543,10 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_divide)
     else if (IS_BLOCKABLE_BINARY(sizeof(@type@), NPY_SIMD_WIDTH)) {
         TO_SIMD_SFX(vsx4_simd_divide_contig)(args, dimensions[0]);
     }
+#elif defined(NPY_HAVE_LASX) || defined(NPY_HAVE_LSX)
+    else if (IS_BLOCKABLE_BINARY(sizeof(@type@), NPY_SIMD_WIDTH)) {
+        TO_SIMD_SFX(loongarch_simd_divide_contig)(args, dimensions[0]);
+    }
 #endif
     // for contiguous block of memory, divisor is a scalar and not 0
     else if (IS_BLOCKABLE_BINARY_SCALAR2(sizeof(@type@), NPY_SIMD_WIDTH) &&
@@ -444,6 +606,13 @@ NPY_NO_EXPORT int NPY_CPU_DISPATCH_CURFX(@TYPE@_divide_indexed)
  * to the native scalar dividers.
  * Therefore it's better to disable NPYV in this special case to avoid any unnecessary shuffles.
  * Power10(VSX4) is an exception here since it has native support for integer vector division.
+ *
+ * LoongArch is also excluded here even though xvdiv_d / xvdiv_du are native: the existing
+ * divide-by-scalar kernel (`simd_divide_by_scalar_contig`) uses Granlund-Möller magic that
+ * needs multiply-high on emulated 64-bit, which is slow on LSX. Our new
+ * loongarch_simd_divide_contig kernel for vector-by-vector could handle u64 directly with
+ * xvdiv_du, but the dispatch macro guards both paths together. TODO: split the guards so
+ * 64-bit vector-by-vector floor_divide also benefits.
  */
 #if NPY_BITSOF_@STYPE@ == 64 && !defined(NPY_HAVE_VSX4) && (defined(NPY_HAVE_VSX) || defined(NPY_HAVE_NEON) || defined(NPY_HAVE_LSX))
     #undef TO_SIMD_SFX
@@ -468,6 +637,10 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_divide)
     // both arguments are arrays of the same size
     else if (IS_BLOCKABLE_BINARY(sizeof(@type@), NPY_SIMD_WIDTH)) {
         TO_SIMD_SFX(vsx4_simd_divide_contig)(args, dimensions[0]);
+    }
+#elif defined(NPY_HAVE_LASX) || defined(NPY_HAVE_LSX)
+    else if (IS_BLOCKABLE_BINARY(sizeof(@type@), NPY_SIMD_WIDTH)) {
+        TO_SIMD_SFX(loongarch_simd_divide_contig)(args, dimensions[0]);
     }
 #endif
     // for contiguous block of memory, divisor is a scalar and not 0
