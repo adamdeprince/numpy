@@ -967,7 +967,7 @@ foreach gen_mtargets : [
       ASIMD, NEON,
       VSX3, VSX2,
       VXE, VX,
-      LSX,
+      LASX, LSX,
     ]
   ],
   [
@@ -1066,7 +1066,7 @@ foreach gen_mtargets : [
       X86_V4, X86_V3, X86_V2,
       VSX2,
       VXE, VX,
-      LSX,
+      LASX, LSX,
     ]
   ],
   [
@@ -1077,7 +1077,7 @@ foreach gen_mtargets : [
       VSX2,
       ASIMD, NEON,
       VXE, VX,
-      LSX,
+      LASX, LSX,
     ]
   ],
   [
@@ -1098,7 +1098,7 @@ foreach gen_mtargets : [
       ASIMD, NEON,
       VSX3, VSX2,
       VXE, VX,
-      LSX,
+      LASX, LSX,
     ]
   ],
   [
@@ -1109,7 +1109,7 @@ foreach gen_mtargets : [
       NEON,
       VSX2,
       VX,
-      LSX,
+      LASX, LSX,
       RVV
     ]
   ],

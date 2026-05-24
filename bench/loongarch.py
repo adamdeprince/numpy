@@ -97,6 +97,14 @@ UNARY: list[UnarySpec] = [
 
 # Binary ops.
 BINARY: list[BinarySpec] = [
+    # loops_arithm_fp — the bread-and-butter element-wise float arithmetic.
+    # Divisor range kept away from 0. These are where the LASX-vs-LSX width
+    # question lives: add/sub/mul are largely memory-bound, divide is
+    # throughput-bound on the FP divider (the more likely LASX winner).
+    BinarySpec("add",      -1.0e3, 1.0e3, -1.0e3, 1.0e3, "loops_arithm_fp"),
+    BinarySpec("subtract", -1.0e3, 1.0e3, -1.0e3, 1.0e3, "loops_arithm_fp"),
+    BinarySpec("multiply", -1.0e3, 1.0e3, -1.0e3, 1.0e3, "loops_arithm_fp"),
+    BinarySpec("divide",    0.5,   4.0,   0.5,    4.0,   "loops_arithm_fp"),
     BinarySpec("arctan2", -1.0, 1.0, 0.5, 2.5, "loops_umath_fp Tier 2"),
     BinarySpec("power",    0.5, 4.0, 0.5, 4.0, "loops_umath_fp Tier 2"),
 ]
