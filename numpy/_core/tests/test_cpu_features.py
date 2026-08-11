@@ -473,10 +473,10 @@ is_loongarch = re.match(r"^(loongarch)", machine, re.IGNORECASE)
     reason="Only for Linux and LoongArch",
 )
 class Test_LOONGARCH_Features(AbstractTest):
-    features = ["LSX"]
+    features = ["LSX", "LASX"]
 
     def load_flags(self):
-        self.load_flags_cpuinfo("Features")
+        self.load_flags_cpuinfo("features")
 
 
 is_riscv = re.match(r"^(riscv)", machine, re.IGNORECASE)

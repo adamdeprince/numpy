@@ -76,8 +76,8 @@ NPY_FINLINE npyv_u16x2 npyv_expand_u16_u8(npyv_u8 data) {
     __m256i hi_ext = __lasx_xvexth_hu_bu(data);     // [u16s of bytes 8-15 | u16s of bytes 24-31]
     // val[0] wants u16s of bytes 0-15  = [lo_ext.low, hi_ext.low]
     // val[1] wants u16s of bytes 16-31 = [lo_ext.high, hi_ext.high]
-    r.val[0] = __lasx_xvpermi_q(lo_ext, hi_ext, 0x20);
-    r.val[1] = __lasx_xvpermi_q(lo_ext, hi_ext, 0x31);
+    r.val[0] = __lasx_xvpermi_q(hi_ext, lo_ext, 0x20);
+    r.val[1] = __lasx_xvpermi_q(hi_ext, lo_ext, 0x31);
     return r;
 }
 
@@ -85,8 +85,8 @@ NPY_FINLINE npyv_u32x2 npyv_expand_u32_u16(npyv_u16 data) {
     npyv_u32x2 r;
     __m256i lo_ext = __lasx_xvsllwil_wu_hu(data, 0);
     __m256i hi_ext = __lasx_xvexth_wu_hu(data);
-    r.val[0] = __lasx_xvpermi_q(lo_ext, hi_ext, 0x20);
-    r.val[1] = __lasx_xvpermi_q(lo_ext, hi_ext, 0x31);
+    r.val[0] = __lasx_xvpermi_q(hi_ext, lo_ext, 0x20);
+    r.val[1] = __lasx_xvpermi_q(hi_ext, lo_ext, 0x31);
     return r;
 }
 
@@ -132,9 +132,10 @@ NPY_FINLINE npyv_s32 npyv_round_s32_f64(npyv_f64 a, npyv_f64 b)
     // xvftintrne_w_d packs two f64 vectors (4+4 doubles) into one s32 (8 lanes)
     // The intrinsic operates within 128-bit halves, producing:
     // [a[0]i, a[1]i, b[0]i, b[1]i | a[2]i, a[3]i, b[2]i, b[3]i]
-    // We want contiguous [a[0..3]i, b[0..3]i], so permute 32-bit lanes.
+    // We want contiguous [a[0..3]i, b[0..3]i], so exchange the
+    // middle pair of 32-bit lanes as 64-bit elements.
     __m256i raw = __lasx_xvftintrne_w_d(b, a);
-    return __lasx_xvshuf_w((__m256i)(v8i32){0, 1, 4, 5, 2, 3, 6, 7}, raw, raw);
+    return __lasx_xvpermi_d(raw, 0xd8);
 }
 
 #endif // _NPY_SIMD_LASX_CVT_H

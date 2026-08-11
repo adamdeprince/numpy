@@ -21,6 +21,20 @@
 #include "simd/simd.h"
 #include "npy_simd_data.h"
 
+/*
+ * Keep these kernels available as building blocks for the f16 bridge and
+ * other NPYV kernels, but do not dispatch them directly when they do not
+ * meet NumPy's bundled transcendental reference tolerances. The ufunc
+ * dispatchers honor these flags and use their scalar libm paths instead.
+ */
+#define NPYV_FORCE_SCALAR_exp_f32   1
+#define NPYV_FORCE_SCALAR_exp_f64   1
+#define NPYV_FORCE_SCALAR_log_f32   1
+#define NPYV_FORCE_SCALAR_log_f64   1
+#define NPYV_FORCE_SCALAR_log1p_f32 1
+#define NPYV_FORCE_SCALAR_expm1_f32 1
+#define NPYV_FORCE_SCALAR_expm1_f64 1
+
 /* ============================================================================
  * float32 kernel
  * ============================================================================ */

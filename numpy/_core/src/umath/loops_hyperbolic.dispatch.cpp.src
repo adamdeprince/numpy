@@ -677,18 +677,11 @@ simd_tanh_f32(const float *src, npy_intp ssrc, float *dst, npy_intp sdst, npy_in
  * #sfx  = f32,   f64#
  * #ssfx = f,     #
  * #simd = HWY_NATIVE_FMA && NPY_SIMD_F32, HWY_NATIVE_FMA && NPY_SIMD_F64#
- * #loong_skip = 0, 1#
  */
 /**begin repeat1
  *  #func = tanh#
  *  #simd_req_clear = 1#
  */
-/* On LoongArch (LSX/LASX), DOUBLE_tanh comes from the NPYV path in
- * loops_umath_fp.dispatch.c.src (faster than the Highway scalar-fallback
- * f64 path on this target). FLOAT_tanh stays here — the Highway SVML
- * port is faster than our NPYV expm1-based form for f32. The
- * `loong_skip` repeat variable selects which type to gate. */
-#if !(@loong_skip@ && (defined(NPY_HAVE_LSX) || defined(NPY_HAVE_LASX)))
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@func@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
@@ -718,6 +711,5 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@func@)
     }
 #endif
 }
-#endif /* loong_skip gating */
 /**end repeat1**/
 /**end repeat**/

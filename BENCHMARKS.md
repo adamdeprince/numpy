@@ -1,135 +1,160 @@
-# Benchmarks — dragon-array vs. stock NumPy 2.5.0
+# Loongson 3A6000 benchmarks
 
-The only comparison that matters for a release is this build vs. the NumPy it
-derives from, on the target hardware. Everything here is:
+This document records the current DragonArray performance snapshot on a
+Loongson 3A6000. It does not claim results for the 3C5000.
 
-> dragon-array `2.5.0.dev0+dragon.unofficial.1` vs stock NumPy `2.5.0.dev0`,
-> both built from the same source tree with the same toolchain
-> (`/opt/loongson-gcc-15.2.0`), on a Loongson 3A6000 @ 2.0 GHz.
+## Test system
 
-Numbers are M elements/sec on the contiguous path — each build running its
-*best* available SIMD (stock uses LSX + Highway; dragon adds LASX). The ratio is
-the speedup a user gets by installing this wheel instead of building stock NumPy
-on the same chip.
+| | Stock NumPy | DragonArray |
+|---|---|---|
+| Version | `2.5.0.dev0+git20260515.79b0331` | `2.5.0.dev0+dragon.unofficial.1` |
+| Source | upstream `79b033101a` | current 2026-08-10 working tree |
+| Runtime SIMD | LSX baseline | LSX baseline + LASX dispatch |
 
-Earlier development-snapshot numbers (vs. scalar fallback, vs. intermediate
-builds) have been removed — a reader can't reproduce those, only this
-release-vs-stock comparison.
+- CPU: Loongson 3A6000 at 2.0 GHz
+- OS: Linux 5.4.18-167-generic, loongarch64
+- Compiler: GCC 15.2.0
+- Python: 3.13.13
+- Benchmark: `bench/loongarch.py --iters 30`
+- Array length: 1,000,000 elements
 
-## Headline
+Throughput is reported in millions of contiguous elements per second. Speedup
+is DragonArray throughput divided by stock NumPy throughput. Both builds were
+run on the same machine with the same benchmark inputs.
 
-Geometric mean 3.31× across 135 operation × dtype pairs. Range 0.81×–26×.
+## Summary
 
-| dtype family | ops | geomean |
-|---|---:|---:|
-| float16 | 20 | 10.72× |
-| bool | 2 | 11.43× |
-| float32 | 27 | 4.46× |
-| float64 | 27 | 3.60× |
-| integer | 59 | 1.79× |
-| all | 135 | 3.31× |
+The full run covers 135 operation-and-dtype pairs. Its raw geometric-mean
+speedup is **1.81x**.
 
-float16 and the float transcendentals see the largest gains because stock NumPy
-falls back to scalar libm for them on LoongArch — dragon vectorizes them.
-Integer is lower because stock already vectorizes most integer ops on LSX, so
-dragon is beating LSX (or matching it on bandwidth-bound ops), not scalar.
-
-## Highlights
-
-### float16 (LASX f16↔f32 bridge — stock has no SIMD here)
-| op | stock | dragon | speedup |
+| Family | Pairs | Raw geomean | Pairs at least 1.10x |
 |---|---:|---:|---:|
-| `tanh` | 21 | 542 | 26.1× |
-| `sinh` | 11 | 216 | 19.0× |
-| `expm1` | 36 | 637 | 18.0× |
-| `tan` | 29 | 463 | 16.3× |
-| `arctanh` | 24 | 367 | 15.7× |
-| `log10` | 43 | 635 | 14.8× |
+| Boolean | 2 | 8.31x | 2 |
+| `float16` | 20 | 2.77x | 9 |
+| `float32` | 27 | 1.61x | 8 |
+| `float64` | 27 | 1.25x | 6 |
+| Integer | 59 | 1.86x | 32 |
+| **All** | **135** | **1.81x** | **57** |
 
-(20 f16 ops, geomean 10.7×.)
+The raw aggregate includes the benchmark's fixed operation order. Basic
+floating-point arithmetic is order-sensitive on this machine, so its confirmed
+results are reported separately below.
 
-### Transcendentals (speedup, f64 / f32)
-| op | f64 | f32 |
-|---|---:|---:|
-| `exp` | 4.74× | 3.32× |
-| `log` | 4.45× | 3.77× |
-| `sin` | 3.49× | 5.75× |
-| `cos` | 3.51× | 5.70× |
-| `tanh` | 5.76× | 13.0× |
-| `cbrt` | 3.21× | 10.5× |
-| `exp2` | 14.6× | 2.94× |
-| `arctanh` | 14.8× | 7.80× |
-| `power` | 3.54× | 2.21× |
+## Largest current gains
 
-### Integer divide / modulo (native LASX `xvdiv`/`xvmod`; stock = scalar)
-| op | dtype | speedup |
-|---|---|---:|
-| `floor_divide` | int8 | 16.7× |
-| `mod` | int8 | 14.3× |
-| `mod` | i32 | 6.70× |
-| `floor_divide` | i32 | 6.69× |
-| `floor_divide` | uint8 | 5.93× |
+| Operation | Dtype | Stock | DragonArray | Speedup |
+|---|---|---:|---:|---:|
+| `arctanh` | `float16` | 24.0 | 453.9 | 18.91x |
+| `floor_divide` | `int8` | 163.5 | 2675.7 | 16.37x |
+| `mod` | `int8` | 173.7 | 2475.5 | 14.25x |
+| `sin` | `float16` | 52.4 | 689.3 | 13.16x |
+| `cos` | `float16` | 51.4 | 662.0 | 12.88x |
+| `arcsinh` | `float16` | 21.1 | 261.2 | 12.38x |
+| `tanh` | `float32` | 26.5 | 319.0 | 12.04x |
+| `floor_divide` | `int16` | 157.7 | 1827.1 | 11.59x |
+| `log1p` | `float16` | 36.1 | 392.4 | 10.87x |
+| `logical_and` | `bool` | 1044.5 | 11346.8 | 10.86x |
 
-### Sort (Highway qsort, now LASX)
-| dtype | stock | dragon | speedup |
-|---|---:|---:|---:|
-| f32 | 11 | 72 | 6.5× |
-| i16 | 15 | 93 | 6.3× |
-| i32 | 15 | 78 | 5.2× |
-| f64 | 11 | 36 | 3.2× |
-| i64 | 16 | 40 | 2.6× |
+## Floating-point kernels
 
-### Boolean & minmax
-| op | dtype | speedup |
-|---|---|---:|
-| `logical_and` | bool | 14.8× |
-| `logical_not` | bool | 8.8× |
-| `max` | i64 | 1.35× |
-| `max` | uint8 | 1.27× |
+These are the floating-point operation-and-dtype pairs that currently measure
+at least 1.10x faster than stock. Unlisted transcendental pairs are at parity in
+this run.
 
-## Tradeoff: f32 `add` / `subtract` / `multiply` regress
+| Dtype | Operation | Stock | DragonArray | Speedup |
+|---|---|---:|---:|---:|
+| `float16` | `arcsinh` | 21.1 | 261.2 | 12.38x |
+| `float16` | `arctanh` | 24.0 | 453.9 | 18.91x |
+| `float16` | `cbrt` | 36.1 | 145.7 | 4.04x |
+| `float16` | `cos` | 51.4 | 662.0 | 12.88x |
+| `float16` | `log` | 68.0 | 442.1 | 6.50x |
+| `float16` | `log10` | 43.2 | 421.8 | 9.76x |
+| `float16` | `log1p` | 36.1 | 392.4 | 10.87x |
+| `float16` | `log2` | 67.8 | 422.7 | 6.24x |
+| `float16` | `sin` | 52.4 | 689.3 | 13.16x |
+| `float32` | `arcsin` | 95.9 | 194.1 | 2.02x |
+| `float32` | `arctan` | 64.2 | 573.1 | 8.93x |
+| `float32` | `arctan2` | 43.5 | 205.7 | 4.73x |
+| `float32` | `cos` | 78.1 | 410.5 | 5.26x |
+| `float32` | `sin` | 77.4 | 423.4 | 5.47x |
+| `float32` | `tanh` | 26.5 | 319.0 | 12.04x |
+| `float64` | `arctan` | 45.4 | 207.5 | 4.57x |
+| `float64` | `arctan2` | 24.6 | 80.5 | 3.27x |
+| `float64` | `cbrt` | 42.8 | 136.7 | 3.19x |
+| `float64` | `log1p` | 63.4 | 262.8 | 4.15x |
+| `float64` | `tanh` | 24.0 | 54.8 | 2.28x |
 
-| op | f32 | f64 |
-|---|---:|---:|
-| `divide` | 1.92× | 1.04× |
-| `add` | 0.81× | 1.14× |
-| `subtract` | 0.81× | 1.10× |
-| `multiply` | 0.81× | 1.09× |
+`float32` divide is listed with the other basic arithmetic results because it
+was checked under both benchmark orders.
 
-Measured: f32 `add`/`subtract`/`multiply` run ~19% slower on LASX than on
-stock's LSX at n=1,000,000, while f32 `divide` and all f64 arithmetic are
-faster. `loops_arithm_fp` is one dispatch unit (no per-op split), so it's kept
-on LASX for the `divide`/f64 wins; large-array f32 `add`/`mul` are faster on
-stock today.
+## Basic floating-point arithmetic
 
-Cause not profiled — the likely explanation is that these are
-memory-bandwidth-bound and 256-bit streaming isn't faster than 128-bit here,
-but that's a hypothesis, not measured. Whether it differs on cache-resident
-data or higher-bandwidth parts is untested.
+The table reports median DragonArray/stock ratios from matched rounds in two
+confirmation runs. "Dtype grouped" measures all four operations for one dtype
+before moving to the next dtype. "Operation grouped" alternates `float32` and
+`float64` for each operation.
 
-Comparison ops (`less`/`greater`/…) are kept on LSX: measured 0.78–0.92× on
-LASX for 32/64-bit dtypes (8/16-bit flat), with no dtype above 1.02×. The LASX
-path for their 1-byte bool output uses cross-128-bit-lane packing the LSX path
-avoids (visible in the backend code) — the likely cause, given the regression
-tracks pack depth.
+| Operation | f32 dtype grouped | f32 operation grouped | f64 dtype grouped | f64 operation grouped |
+|---|---:|---:|---:|---:|
+| `add` | 0.99x | 0.83x | 0.99x | 0.71x |
+| `subtract` | 0.99x | 1.05x | 1.00x | 0.73x |
+| `multiply` | 1.00x | 1.05x | 1.01x | 0.73x |
+| `divide` | 1.91x | 1.92x | 1.13x | 0.78x |
 
-## Methodology
+`float32` divide is the stable result here: it remains about **1.9x** faster in
+both orders. The other arithmetic figures should be treated as
+working-set/order-sensitive measurements, not stable regressions or gains.
 
-- Both numpys built from the same tree, same `gcc-15`, libstdc++ statically
-  linked. Versions: `2.5.0.dev0` (stock) and `2.5.0.dev0+dragon.unofficial.1`.
-- `bench/loongarch.py --iters 30`, n = 1,000,000, run back-to-back on an
-  otherwise-idle box — the only valid way. Comparing runs taken minutes apart
-  under different load produces garbage; watch the `max`/`multiply` *control*
-  ops (where the result should be stable) to catch a contaminated run.
-- Reproduce:
-  ```bash
-  PYTHONPATH=<stock-install>  python bench/loongarch.py --iters 30 > stock.txt
-  PYTHONPATH=<dragon-install> python bench/loongarch.py --iters 30 > dragon.txt
-  # then compare the contiguous column op-by-op
-  ```
+## Integer, boolean, and sort highlights
 
-## Hardware
+LASX integer division is most effective through 32 bits. Integer modulo is
+faster for every measured width.
 
-- CPU: Loongson 3A6000 @ 2.0 GHz, LSX (128-bit) + LASX (256-bit) in HWCAP.
-- Toolchain: GCC 15.2.0 (`/opt/loongson-gcc-15.2.0`).
-- Python: 3.13.
+| Operation | Dtype | Stock | DragonArray | Speedup |
+|---|---|---:|---:|---:|
+| `floor_divide` | `int8` | 163.5 | 2675.7 | 16.37x |
+| `floor_divide` | `int16` | 157.7 | 1827.1 | 11.59x |
+| `floor_divide` | `int32` | 165.3 | 1114.8 | 6.74x |
+| `floor_divide` | `uint8` | 408.9 | 2425.8 | 5.93x |
+| `floor_divide` | `uint16` | 286.2 | 1744.9 | 6.10x |
+| `floor_divide` | `uint32` | 189.9 | 1117.4 | 5.88x |
+| `mod` | `int8` | 173.7 | 2475.5 | 14.25x |
+| `mod` | `int16` | 168.3 | 1641.7 | 9.76x |
+| `mod` | `int32` | 157.1 | 1052.7 | 6.70x |
+| `mod` | `int64` | 102.8 | 527.0 | 5.13x |
+| `logical_and` | `bool` | 1044.5 | 11346.8 | 10.86x |
+| `logical_not` | `bool` | 1866.3 | 11875.2 | 6.36x |
+| `sort` | `float32` | 11.0 | 74.9 | 6.81x |
+| `sort` | `float64` | 11.0 | 36.8 | 3.35x |
+| `sort` | `int16` | 14.7 | 93.6 | 6.37x |
+| `sort` | `int32` | 14.8 | 80.3 | 5.43x |
+| `sort` | `int64` | 15.6 | 41.8 | 2.68x |
+
+Integer `max` reductions measure between 1.28x and 2.00x across the eight
+signed and unsigned integer widths. Integer add, multiply, comparison, and
+argmax are generally near parity at this array size.
+
+## Reproducing the run
+
+Run the two builds back-to-back on an otherwise idle 3A6000:
+
+```bash
+PYTHONPATH=<stock-install> \
+    python3 bench/loongarch.py --iters 30 > stock.txt
+PYTHONPATH=<dragon-install> \
+    python3 bench/loongarch.py --iters 30 > dragon.txt
+```
+
+Compare the contiguous-throughput column row by row. The benchmark performs
+three warm-up calls before each timed loop. Sort uses 10 timed iterations;
+other operations use 30.
+
+The exact 2026-08-10 artifacts are:
+
+- [stock raw output](.benchresults/2026-08-10-stock-loongarch-raw.txt)
+- [DragonArray raw output](.benchresults/2026-08-10-dragon-loongarch-raw.txt)
+- [stock parsed CSV](.benchresults/2026-08-10-before-stock-2.5.0.csv)
+- [DragonArray parsed CSV](.benchresults/2026-08-10-after-dragon-2.5.0.csv)
+- [DragonArray/stock comparison](.benchresults/2026-08-10-dragon-vs-stock-2.5.0.csv)
+- [dtype-grouped arithmetic confirmation](.benchresults/2026-08-10-arithmetic-confirm-dtype-order.txt)
+- [operation-grouped arithmetic confirmation](.benchresults/2026-08-10-arithmetic-confirm-op-order.txt)

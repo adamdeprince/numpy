@@ -11,25 +11,35 @@
 /***************************
  * load/store
  ***************************/
-#define NPYV_IMPL_LASX_MEM(SFX, CTYPE)                              \
-    NPY_FINLINE npyv_##SFX npyv_load_##SFX(const CTYPE *ptr)        \
-    { return (npyv_##SFX)(__lasx_xvld(ptr, 0)); }                   \
-    NPY_FINLINE npyv_##SFX npyv_loada_##SFX(const CTYPE *ptr)       \
-    { return (npyv_##SFX)(__lasx_xvld(ptr, 0)); }                   \
-    NPY_FINLINE npyv_##SFX npyv_loads_##SFX(const CTYPE *ptr)       \
-    { return (npyv_##SFX)(__lasx_xvld(ptr, 0)); }                   \
-    NPY_FINLINE npyv_##SFX npyv_loadl_##SFX(const CTYPE *ptr)       \
-    { return (npyv_##SFX)__lasx_xvldrepl_d(ptr, 0); }               \
-    NPY_FINLINE void npyv_store_##SFX(CTYPE *ptr, npyv_##SFX vec)   \
-    { __lasx_xvst(vec, ptr, 0); }                                   \
-    NPY_FINLINE void npyv_storea_##SFX(CTYPE *ptr, npyv_##SFX vec)  \
-    { __lasx_xvst(vec, ptr, 0); }                                   \
-    NPY_FINLINE void npyv_stores_##SFX(CTYPE *ptr, npyv_##SFX vec)  \
-    { __lasx_xvst(vec, ptr, 0); }                                   \
-    NPY_FINLINE void npyv_storel_##SFX(CTYPE *ptr, npyv_##SFX vec)  \
-    { __lasx_xvstelm_d(vec, ptr, 0, 0); }                           \
-    NPY_FINLINE void npyv_storeh_##SFX(CTYPE *ptr, npyv_##SFX vec)  \
-    { __lasx_xvstelm_d(vec, ptr, 0, 1); }
+#define NPYV_IMPL_LASX_MEM(SFX, CTYPE)                               \
+    NPY_FINLINE npyv_##SFX npyv_load_##SFX(const CTYPE *ptr)         \
+    { return (npyv_##SFX)(__lasx_xvld(ptr, 0)); }                    \
+    NPY_FINLINE npyv_##SFX npyv_loada_##SFX(const CTYPE *ptr)        \
+    { return (npyv_##SFX)(__lasx_xvld(ptr, 0)); }                    \
+    NPY_FINLINE npyv_##SFX npyv_loads_##SFX(const CTYPE *ptr)        \
+    { return (npyv_##SFX)(__lasx_xvld(ptr, 0)); }                    \
+    NPY_FINLINE npyv_##SFX npyv_loadl_##SFX(const CTYPE *ptr)        \
+    {                                                                \
+        __m256i lo = __lasx_xvldrepl_d(ptr, 0);                      \
+        __m256i hi = __lasx_xvldrepl_d(ptr, 8);                      \
+        return (npyv_##SFX)__lasx_xvilvl_d(hi, lo);                  \
+    }                                                                \
+    NPY_FINLINE void npyv_store_##SFX(CTYPE *ptr, npyv_##SFX vec)    \
+    { __lasx_xvst(vec, ptr, 0); }                                    \
+    NPY_FINLINE void npyv_storea_##SFX(CTYPE *ptr, npyv_##SFX vec)   \
+    { __lasx_xvst(vec, ptr, 0); }                                    \
+    NPY_FINLINE void npyv_stores_##SFX(CTYPE *ptr, npyv_##SFX vec)   \
+    { __lasx_xvst(vec, ptr, 0); }                                    \
+    NPY_FINLINE void npyv_storel_##SFX(CTYPE *ptr, npyv_##SFX vec)   \
+    {                                                                \
+        __lasx_xvstelm_d(vec, ptr, 0, 0);                            \
+        __lasx_xvstelm_d(vec, ptr, 8, 1);                            \
+    }                                                                \
+    NPY_FINLINE void npyv_storeh_##SFX(CTYPE *ptr, npyv_##SFX vec)   \
+    {                                                                \
+        __lasx_xvstelm_d(vec, ptr, 0, 2);                            \
+        __lasx_xvstelm_d(vec, ptr, 8, 3);                            \
+    }
 
 NPYV_IMPL_LASX_MEM(u8,  npy_uint8)
 NPYV_IMPL_LASX_MEM(s8,  npy_int8)
@@ -377,15 +387,12 @@ NPY_FINLINE void npyv_storen_till_s32(npy_int32 *ptr, npy_intp stride, npy_uintp
     assert(nlane > 0);
     if (nlane >= 8) { npyv_storen_s32(ptr, stride, a); return; }
     __lasx_xvstelm_w(a, ptr, 0, 0);
-    switch(nlane) {
-        case 1: return;
-        case 7: ptr[stride*6] = __lasx_xvpickve2gr_w(a, 6); /* fallthrough */
-        case 6: ptr[stride*5] = __lasx_xvpickve2gr_w(a, 5); /* fallthrough */
-        case 5: ptr[stride*4] = __lasx_xvpickve2gr_w(a, 4); /* fallthrough */
-        case 4: ptr[stride*3] = __lasx_xvpickve2gr_w(a, 3); /* fallthrough */
-        case 3: ptr[stride*2] = __lasx_xvpickve2gr_w(a, 2); /* fallthrough */
-        case 2: ptr[stride*1] = __lasx_xvpickve2gr_w(a, 1); break;
-    }
+    if (nlane > 1) ptr[stride*1] = __lasx_xvpickve2gr_w(a, 1);
+    if (nlane > 2) ptr[stride*2] = __lasx_xvpickve2gr_w(a, 2);
+    if (nlane > 3) ptr[stride*3] = __lasx_xvpickve2gr_w(a, 3);
+    if (nlane > 4) ptr[stride*4] = __lasx_xvpickve2gr_w(a, 4);
+    if (nlane > 5) ptr[stride*5] = __lasx_xvpickve2gr_w(a, 5);
+    if (nlane > 6) ptr[stride*6] = __lasx_xvpickve2gr_w(a, 6);
 }
 //// 64 (4 lanes)
 NPY_FINLINE void npyv_storen_till_s64(npy_int64 *ptr, npy_intp stride, npy_uintp nlane, npyv_s64 a)
@@ -393,11 +400,8 @@ NPY_FINLINE void npyv_storen_till_s64(npy_int64 *ptr, npy_intp stride, npy_uintp
     assert(nlane > 0);
     if (nlane >= 4) { npyv_storen_s64(ptr, stride, a); return; }
     __lasx_xvstelm_d(a, ptr, 0, 0);
-    switch(nlane) {
-        case 1: return;
-        case 3: ptr[stride*2] = __lasx_xvpickve2gr_d(a, 2); /* fallthrough */
-        case 2: ptr[stride*1] = __lasx_xvpickve2gr_d(a, 1); break;
-    }
+    if (nlane > 1) ptr[stride*1] = __lasx_xvpickve2gr_d(a, 1);
+    if (nlane > 2) ptr[stride*2] = __lasx_xvpickve2gr_d(a, 2);
 }
 
 //// 64-bit store over 32-bit stride (up to 4 pairs)
@@ -406,11 +410,8 @@ NPY_FINLINE void npyv_storen2_till_s32(npy_int32 *ptr, npy_intp stride, npy_uint
     assert(nlane > 0);
     if (nlane >= 4) { npyv_storen2_s32(ptr, stride, a); return; }
     __lasx_xvstelm_d((__m256i)a, ptr, 0, 0);
-    switch(nlane) {
-        case 1: return;
-        case 3: __lasx_xvstelm_d((__m256i)a, ptr + stride*2, 0, 2); /* fallthrough */
-        case 2: __lasx_xvstelm_d((__m256i)a, ptr + stride*1, 0, 1); break;
-    }
+    if (nlane > 1) __lasx_xvstelm_d((__m256i)a, ptr + stride*1, 0, 1);
+    if (nlane > 2) __lasx_xvstelm_d((__m256i)a, ptr + stride*2, 0, 2);
 }
 
 //// 128-bit store over 64-bit stride (up to 2 pairs)

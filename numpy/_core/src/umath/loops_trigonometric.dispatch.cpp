@@ -230,7 +230,15 @@ simd_sincos_f32(const float *src, npy_intp ssrc, float *dst, npy_intp sdst,
 #include "npyv_sincos.h"
 #endif
 
-#if NPY_SIMD && defined(__loongarch__) && defined(NPYV_IMPL_F64_EXP_LOG)
+/*
+ * The current LoongArch f64 sin/cos kernel misses NumPy's bundled reference
+ * tolerances. Retain it for follow-up work, but use the established libm
+ * implementation for production dispatch.
+ */
+#define NPYV_FORCE_SCALAR_SINCOS_F64 1
+
+#if NPY_SIMD && defined(__loongarch__) && defined(NPYV_IMPL_F64_EXP_LOG) && \
+        !defined(NPYV_FORCE_SCALAR_SINCOS_F64)
 
 #define DISPATCH_DOUBLE_FUNC(func, OPCODE)                                  \
     NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_##func)(               \

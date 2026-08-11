@@ -6,6 +6,38 @@
 #include "fast_loop_macros.h"
 #include "npyv_exp_log.h"
 
+/*
+ * These NPYV kernels remain available for further development, but their
+ * current approximations do not satisfy NumPy's reference-vector or
+ * contiguous-vs-strided accuracy requirements. Keep them out of ufunc
+ * dispatch until they meet those contracts.
+ */
+#define NPYV_FORCE_SCALAR_sinh_f32  1
+#define NPYV_FORCE_SCALAR_sinh_f64  1
+#define NPYV_FORCE_SCALAR_cosh_f32  1
+#define NPYV_FORCE_SCALAR_cosh_f64  1
+#define NPYV_FORCE_SCALAR_exp2_f32  1
+#define NPYV_FORCE_SCALAR_exp2_f64  1
+#define NPYV_FORCE_SCALAR_log2_f32  1
+#define NPYV_FORCE_SCALAR_log2_f64  1
+#define NPYV_FORCE_SCALAR_log10_f32 1
+#define NPYV_FORCE_SCALAR_log10_f64 1
+#define NPYV_FORCE_SCALAR_asinh_f32 1
+#define NPYV_FORCE_SCALAR_asinh_f64 1
+#define NPYV_FORCE_SCALAR_acosh_f32 1
+#define NPYV_FORCE_SCALAR_acosh_f64 1
+#define NPYV_FORCE_SCALAR_atanh_f32 1
+#define NPYV_FORCE_SCALAR_atanh_f64 1
+#define NPYV_FORCE_SCALAR_tanh_f64  1
+#define NPYV_FORCE_SCALAR_asin_f64  1
+#define NPYV_FORCE_SCALAR_acos_f32  1
+#define NPYV_FORCE_SCALAR_acos_f64  1
+#define NPYV_FORCE_SCALAR_tan_f32   1
+#define NPYV_FORCE_SCALAR_tan_f64   1
+#define NPYV_FORCE_SCALAR_cbrt_f32  1
+#define NPYV_FORCE_SCALAR_pow_f32   1
+#define NPYV_FORCE_SCALAR_pow_f64   1
+
 #if NPY_SIMD && defined(NPY_HAVE_AVX512_SKX) && defined(NPY_CAN_LINK_SVML)
 /**begin repeat
  * #sfx = f32, f64#
@@ -1121,7 +1153,8 @@ NPY_FINLINE npyv_f64 npyv_cbrt_DOUBLE_kernel(npyv_f64 x)
 /**begin repeat1
  *  #intrin = sinh, cosh, exp2, log2, log10, asinh, acosh, atanh, log1p, expm1, atan, asin, acos, cbrt, tan, tanh#
  */
-#if defined(NPYV_HAVE_@intrin@_@sfx@)
+#if defined(NPYV_HAVE_@intrin@_@sfx@) && \
+        !defined(NPYV_FORCE_SCALAR_@intrin@_@sfx@)
 static void
 simd_@intrin@_@sfx@_npyv(const @type@ *src, @type@ *dst, npy_intp n)
 {
@@ -1169,7 +1202,8 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@func@)
         simd_@intrin@_@sfx@(src, ssrc, dst, sdst, len);
         return;
     }
-#elif defined(NPYV_HAVE_@intrin@_@sfx@)
+#elif defined(NPYV_HAVE_@intrin@_@sfx@) && \
+        !defined(NPYV_FORCE_SCALAR_@intrin@_@sfx@)
     if (steps[0] == sizeof(@type@) && steps[1] == sizeof(@type@)) {
         simd_@intrin@_@sfx@_npyv(
             (const @type@ *)args[0], (@type@ *)args[1], dimensions[0]);
@@ -1193,7 +1227,8 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@func@)
  *  #vsub = , f#
  *  #sfx  = f64, f32#
  */
-#if defined(NPYV_HAVE_tanh_@sfx@)
+#if defined(NPYV_HAVE_tanh_@sfx@) && \
+        !defined(NPYV_FORCE_SCALAR_tanh_@sfx@)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_tanh)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
@@ -1486,7 +1521,8 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@func@)
         simd_@intrin@_@sfx@(src1, ssrc1, src2, ssrc2, dst, sdst, len);
         return;
     }
-#elif defined(NPYV_HAVE_pow_@sfx@)
+#elif defined(NPYV_HAVE_pow_@sfx@) && \
+        !defined(NPYV_FORCE_SCALAR_pow_@sfx@)
     if (steps[0] == sizeof(@type@) && steps[1] == sizeof(@type@) &&
         steps[2] == sizeof(@type@) &&
         !is_mem_overlap(args[0], steps[0], args[2], steps[2], dimensions[0]) &&

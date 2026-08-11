@@ -676,6 +676,7 @@ simd_log_FLOAT(npy_float * op,
  * #func     = exp,      log#
  * #scalarf  = npy_expf, npy_logf#
  */
+#if !defined(NPYV_FORCE_SCALAR_@func@_f32)
 static void
 simd_@func@_FLOAT_npyv(const npy_float *src, npy_float *dst, npy_intp n)
 {
@@ -689,20 +690,23 @@ simd_@func@_FLOAT_npyv(const npy_float *src, npy_float *dst, npy_intp n)
         dst[i] = @scalarf@(src[i]);
     }
 }
+#endif
 /**end repeat**/
 
-#endif // NPYV_IMPL_F32_EXP_LOG && !SIMD_AVX2_FMA3 && !SIMD_AVX512F
+#endif // NPYV f32 exp/log dispatch
 
 /********************************************************************************
  ** NPYV implementation of exp/log for f64 — kernels in npyv_exp_log.h.
  ********************************************************************************/
-#if defined(NPYV_IMPL_F64_EXP_LOG) && !defined(SIMD_AVX2_FMA3) && !defined(SIMD_AVX512F) && !defined(SIMD_AVX512F_NOCLANG_BUG)
+#if defined(NPYV_IMPL_F64_EXP_LOG) && !defined(SIMD_AVX2_FMA3) && \
+        !defined(SIMD_AVX512F) && !defined(SIMD_AVX512F_NOCLANG_BUG)
 
 
 /**begin repeat
  * #func     = exp,     log#
  * #scalar   = npy_exp, npy_log#
  */
+#if !defined(NPYV_FORCE_SCALAR_@func@_f64)
 static void
 simd_@func@_DOUBLE_npyv(const npy_double *src, npy_double *dst, npy_intp n)
 {
@@ -716,6 +720,7 @@ simd_@func@_DOUBLE_npyv(const npy_double *src, npy_double *dst, npy_intp n)
         dst[i] = @scalar@(src[i]);
     }
 }
+#endif
 /**end repeat**/
 
 #endif // NPY_SIMD_F64 && !AVX paths
@@ -1354,7 +1359,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_@func@)
             simd_@func@_FLOAT((npy_float *)op1, (npy_float *)ip1, 1, steps[0]);
         }
     }
-#elif defined(NPYV_IMPL_F32_EXP_LOG)
+#elif defined(NPYV_IMPL_F32_EXP_LOG) && !defined(NPYV_FORCE_SCALAR_@func@_f32)
     if (steps[0] == sizeof(npy_float) && steps[1] == sizeof(npy_float)) {
         simd_@func@_FLOAT_npyv(
             (const npy_float *)args[0], (npy_float *)args[1], dimensions[0]);
@@ -1402,7 +1407,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_@func@)
     }
 #endif // SIMD_AVX512F_NOCLANG_BUG
 #endif // NPY_CAN_LINK_SVML
-#if defined(NPYV_IMPL_F64_EXP_LOG)
+#if defined(NPYV_IMPL_F64_EXP_LOG) && !defined(NPYV_FORCE_SCALAR_@func@_f64)
     if (steps[0] == sizeof(npy_double) && steps[1] == sizeof(npy_double)) {
         simd_@func@_DOUBLE_npyv(
             (const npy_double *)args[0], (npy_double *)args[1], dimensions[0]);

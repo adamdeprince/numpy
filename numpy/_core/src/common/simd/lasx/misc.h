@@ -166,10 +166,10 @@ NPY_FINLINE __m256d npyv_select_f64(__m256i mask, __m256d a, __m256d b)
 #define npyv_select_s64 npyv_select_u8
 
 // extract the first vector's lane
-#define npyv_extract0_u8(A) ((npy_uint8)__lasx_xvpickve2gr_bu(A, 0))
-#define npyv_extract0_s8(A) ((npy_int8)__lasx_xvpickve2gr_b(A, 0))
-#define npyv_extract0_u16(A) ((npy_uint16)__lasx_xvpickve2gr_hu(A, 0))
-#define npyv_extract0_s16(A) ((npy_int16)__lasx_xvpickve2gr_h(A, 0))
+#define npyv_extract0_u8(A) ((npy_uint8)__lasx_xvpickve2gr_wu(A, 0))
+#define npyv_extract0_s8(A) ((npy_int8)__lasx_xvpickve2gr_w(A, 0))
+#define npyv_extract0_u16(A) ((npy_uint16)__lasx_xvpickve2gr_wu(A, 0))
+#define npyv_extract0_s16(A) ((npy_int16)__lasx_xvpickve2gr_w(A, 0))
 #define npyv_extract0_u32(A) ((npy_uint32)__lasx_xvpickve2gr_wu(A, 0))
 #define npyv_extract0_s32(A) ((npy_int32)__lasx_xvpickve2gr_w(A, 0))
 #define npyv_extract0_u64(A) ((npy_uint64)__lasx_xvpickve2gr_du(A, 0))

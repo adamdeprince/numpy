@@ -1,0 +1,54 @@
+r1-stock numpy=2.5.0.dev0+git20260515.79b0331
+r1-stock,add,float32,2685.5
+r1-stock,add,float64,855.8
+r1-stock,subtract,float32,2666.7
+r1-stock,subtract,float64,858.3
+r1-stock,multiply,float32,2663.7
+r1-stock,multiply,float64,849.9
+r1-stock,divide,float32,1204.7
+r1-stock,divide,float64,782.7
+r1-previous numpy=2.5.0.dev0+dragon.unofficial.1
+r1-previous,add,float32,2724.7
+r1-previous,add,float64,827.0
+r1-previous,subtract,float32,2207.4
+r1-previous,subtract,float64,824.1
+r1-previous,multiply,float32,2189.7
+r1-previous,multiply,float64,828.7
+r1-previous,divide,float32,2200.3
+r1-previous,divide,float64,832.9
+r1-current numpy=2.5.0.dev0+dragon.unofficial.1
+r1-current,add,float32,2198.4
+r1-current,add,float64,629.1
+r1-current,subtract,float32,2755.8
+r1-current,subtract,float64,625.8
+r1-current,multiply,float32,2762.7
+r1-current,multiply,float64,625.7
+r1-current,divide,float32,2282.4
+r1-current,divide,float64,629.0
+r2-current numpy=2.5.0.dev0+dragon.unofficial.1
+r2-current,add,float32,2210.6
+r2-current,add,float64,623.8
+r2-current,subtract,float32,2838.0
+r2-current,subtract,float64,627.8
+r2-current,multiply,float32,2839.6
+r2-current,multiply,float64,621.3
+r2-current,divide,float32,2327.5
+r2-current,divide,float64,623.2
+r2-previous numpy=2.5.0.dev0+dragon.unofficial.1
+r2-previous,add,float32,2686.5
+r2-previous,add,float64,834.4
+r2-previous,subtract,float32,2231.7
+r2-previous,subtract,float64,826.7
+r2-previous,multiply,float32,2233.0
+r2-previous,multiply,float64,843.8
+r2-previous,divide,float32,2228.7
+r2-previous,divide,float64,834.4
+r2-stock numpy=2.5.0.dev0+git20260515.79b0331
+r2-stock,add,float32,2660.9
+r2-stock,add,float64,901.8
+r2-stock,subtract,float32,2681.4
+r2-stock,subtract,float64,861.5
+r2-stock,multiply,float32,2685.7
+r2-stock,multiply,float64,858.5
+r2-stock,divide,float32,1200.7
+r2-stock,divide,float64,830.6

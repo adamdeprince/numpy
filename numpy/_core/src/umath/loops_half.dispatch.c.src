@@ -127,7 +127,9 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_@func@)
         avx512_@intrin@_f16(src, dst, len);
         return;
     }
-#elif NPY_SIMD && defined(__loongarch__) && defined(__loongarch_asx) && defined(NPYV_HAVE_@intrin@_f32)
+#elif NPY_SIMD && defined(__loongarch__) && defined(__loongarch_asx) && \
+        defined(NPYV_HAVE_@intrin@_f32) && \
+        !defined(NPYV_F16_FORCE_SCALAR_@intrin@)
     if (steps[0] == sizeof(npy_half) && steps[1] == sizeof(npy_half)) {
         npyv__f16_bridge_unary(
             (const npy_half *)args[0], (npy_half *)args[1], dimensions[0],
@@ -141,4 +143,3 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_@func@)
     }
 }
 /**end repeat**/
-

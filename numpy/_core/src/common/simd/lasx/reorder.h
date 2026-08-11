@@ -10,34 +10,34 @@
  * LASX treats most 128-bit-half operations as two independent 128-bit slices,
  * so cross-half work uses xvpermi_q to shuffle the two halves.
  * xvpermi.q semantics for `xvpermi.q xd, xj, imm`:
- *   result low  128 = pick {xd_lo, xd_hi, xj_lo, xj_hi} by imm[1:0]
- *   result high 128 = pick {xd_lo, xd_hi, xj_lo, xj_hi} by imm[5:4]
- *   00 = xd_lo, 01 = xd_hi, 10 = xj_lo, 11 = xj_hi
+ *   result low  128 = pick {xj_lo, xj_hi, xd_lo, xd_hi} by imm[1:0]
+ *   result high 128 = pick {xj_lo, xj_hi, xd_lo, xd_hi} by imm[5:4]
+ *   00 = xj_lo, 01 = xj_hi, 10 = xd_lo, 11 = xd_hi
  */
 
 // combine lower part of two vectors  -> [A_lo, B_lo]
-#define npyv_combinel_u8(A, B)  __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x20)
-#define npyv_combinel_s8(A, B)  __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x20)
-#define npyv_combinel_u16(A, B) __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x20)
-#define npyv_combinel_s16(A, B) __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x20)
-#define npyv_combinel_u32(A, B) __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x20)
-#define npyv_combinel_s32(A, B) __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x20)
-#define npyv_combinel_u64(A, B) __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x20)
-#define npyv_combinel_s64(A, B) __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x20)
-#define npyv_combinel_f32(A, B) (__m256)__lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x20)
-#define npyv_combinel_f64(A, B) (__m256d)__lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x20)
+#define npyv_combinel_u8(A, B)  __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x20)
+#define npyv_combinel_s8(A, B)  __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x20)
+#define npyv_combinel_u16(A, B) __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x20)
+#define npyv_combinel_s16(A, B) __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x20)
+#define npyv_combinel_u32(A, B) __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x20)
+#define npyv_combinel_s32(A, B) __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x20)
+#define npyv_combinel_u64(A, B) __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x20)
+#define npyv_combinel_s64(A, B) __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x20)
+#define npyv_combinel_f32(A, B) (__m256)__lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x20)
+#define npyv_combinel_f64(A, B) (__m256d)__lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x20)
 
 // combine higher part of two vectors -> [A_hi, B_hi]
-#define npyv_combineh_u8(A, B)  __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x31)
-#define npyv_combineh_s8(A, B)  __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x31)
-#define npyv_combineh_u16(A, B) __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x31)
-#define npyv_combineh_s16(A, B) __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x31)
-#define npyv_combineh_u32(A, B) __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x31)
-#define npyv_combineh_s32(A, B) __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x31)
-#define npyv_combineh_u64(A, B) __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x31)
-#define npyv_combineh_s64(A, B) __lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x31)
-#define npyv_combineh_f32(A, B) (__m256)__lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x31)
-#define npyv_combineh_f64(A, B) (__m256d)__lasx_xvpermi_q((__m256i)A, (__m256i)B, 0x31)
+#define npyv_combineh_u8(A, B)  __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x31)
+#define npyv_combineh_s8(A, B)  __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x31)
+#define npyv_combineh_u16(A, B) __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x31)
+#define npyv_combineh_s16(A, B) __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x31)
+#define npyv_combineh_u32(A, B) __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x31)
+#define npyv_combineh_s32(A, B) __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x31)
+#define npyv_combineh_u64(A, B) __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x31)
+#define npyv_combineh_s64(A, B) __lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x31)
+#define npyv_combineh_f32(A, B) (__m256)__lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x31)
+#define npyv_combineh_f64(A, B) (__m256d)__lasx_xvpermi_q((__m256i)B, (__m256i)A, 0x31)
 
 // combine two vectors from lower and higher parts of two other vectors
 NPY_FINLINE npyv_s64x2 npyv__combine(__m256i a, __m256i b)
@@ -87,8 +87,8 @@ NPY_FINLINE npyv_f64x2 npyv_combine_f64(__m256d a, __m256d b)
         T_VEC##x2 r;                                                              \
         __m256i lo = __lasx_xvilvl_##INTR_SFX((__m256i)b, (__m256i)a);            \
         __m256i hi = __lasx_xvilvh_##INTR_SFX((__m256i)b, (__m256i)a);            \
-        r.val[0] = (T_VEC)__lasx_xvpermi_q(lo, hi, 0x20);                         \
-        r.val[1] = (T_VEC)__lasx_xvpermi_q(lo, hi, 0x31);                         \
+        r.val[0] = (T_VEC)__lasx_xvpermi_q(hi, lo, 0x20);                         \
+        r.val[1] = (T_VEC)__lasx_xvpermi_q(hi, lo, 0x31);                         \
         return r;                                                                 \
     }
 
@@ -106,8 +106,8 @@ NPY_FINLINE npyv_f32x2 npyv_zip_f32(__m256 a, __m256 b)
     npyv_f32x2 r;
     __m256i lo = __lasx_xvilvl_w((__m256i)b, (__m256i)a);
     __m256i hi = __lasx_xvilvh_w((__m256i)b, (__m256i)a);
-    r.val[0] = (__m256)__lasx_xvpermi_q(lo, hi, 0x20);
-    r.val[1] = (__m256)__lasx_xvpermi_q(lo, hi, 0x31);
+    r.val[0] = (__m256)__lasx_xvpermi_q(hi, lo, 0x20);
+    r.val[1] = (__m256)__lasx_xvpermi_q(hi, lo, 0x31);
     return r;
 }
 NPY_FINLINE npyv_f64x2 npyv_zip_f64(__m256d a, __m256d b)
@@ -115,8 +115,8 @@ NPY_FINLINE npyv_f64x2 npyv_zip_f64(__m256d a, __m256d b)
     npyv_f64x2 r;
     __m256i lo = __lasx_xvilvl_d((__m256i)b, (__m256i)a);
     __m256i hi = __lasx_xvilvh_d((__m256i)b, (__m256i)a);
-    r.val[0] = (__m256d)__lasx_xvpermi_q(lo, hi, 0x20);
-    r.val[1] = (__m256d)__lasx_xvpermi_q(lo, hi, 0x31);
+    r.val[0] = (__m256d)__lasx_xvpermi_q(hi, lo, 0x20);
+    r.val[1] = (__m256d)__lasx_xvpermi_q(hi, lo, 0x31);
     return r;
 }
 

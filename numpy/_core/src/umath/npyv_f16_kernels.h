@@ -305,6 +305,23 @@ NPY_FINLINE npyv_f32 npyv_acos_FLOAT_kernel(npyv_f32 x)
     return npyv_sub_f32(pi_2, npyv_asin_FLOAT_kernel(x));
 }
 
+/*
+ * These bridge kernels do not stay within one f16 ULP across all 65,536
+ * input bit patterns. loops_half dispatches them through scalar libm until
+ * their approximations meet that requirement.
+ */
+#define NPYV_F16_FORCE_SCALAR_exp   1
+#define NPYV_F16_FORCE_SCALAR_exp2  1
+#define NPYV_F16_FORCE_SCALAR_expm1 1
+#define NPYV_F16_FORCE_SCALAR_sinh  1
+#define NPYV_F16_FORCE_SCALAR_cosh  1
+#define NPYV_F16_FORCE_SCALAR_tan   1
+#define NPYV_F16_FORCE_SCALAR_asin  1
+#define NPYV_F16_FORCE_SCALAR_acos  1
+#define NPYV_F16_FORCE_SCALAR_atan  1
+#define NPYV_F16_FORCE_SCALAR_tanh  1
+#define NPYV_F16_FORCE_SCALAR_acosh 1
+
 #endif /* NPYV_IMPL_F32_EXP_LOG */
 
 #endif /* _NPY_UMATH_NPYV_F16_KERNELS_H */
